@@ -1,7 +1,9 @@
 import axios from "axios";
 import https from "https";
 import { z } from "zod";
-import { Logger, ErrorHandler, decodeAssetName } from "../utils/index.js";
+import { ErrorHandler } from "../utils/errorHandler.js";
+import { decodeAssetName } from "../utils/general.js";
+import { Logger } from "../utils/logger.js";
 import { iagonBaseUrl } from "../constants.js";
 
 // Zod schemas for critical Iagon responses
@@ -69,6 +71,8 @@ import {
   PaymentAddressesResponse,
   HealthStatusResponse,
   AssetInfoResponse,
+  CardanoDataProvider,
+  ChainProviderCapability,
 } from "../types/index.js";
 
 /**
@@ -79,7 +83,9 @@ interface CachedAssetInfo {
   timestamp: number;
 }
 
-export class IagonApiService {
+export class IagonApiService implements CardanoDataProvider {
+  public readonly kind = "iagon" as const;
+  public readonly capabilities = new Set(Object.values(ChainProviderCapability));
   private readonly logger = new Logger("services:iagon-api-service");
   private network: Networks;
   private readonly iagonBaseUrl = iagonBaseUrl;
@@ -458,6 +464,11 @@ export class IagonApiService {
     } catch (error: unknown) {
       throw this.errorHandler.handleApiError(error, `fetching current epoch`);
     }
+  };
+
+  public getCurrentSlot = async (): Promise<number> => {
+    const response = await this.getCurrentEpoch();
+    return response.data.tip.slot;
   };
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "cardano-raw-sdk",
-  "version": "1.4.2",
+  "version": "0.1.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -13,9 +13,11 @@
     "docker:dev": "npm run build && npm start",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.poc.json",
     "lint": "eslint src --ext .ts",
     "test": "jest",
+    "poc:mock": "CUSTODY_MODE=mock tsx scripts/run-demeter-poc.ts",
+    "poc:fireblocks": "CUSTODY_MODE=fireblocks tsx scripts/run-demeter-poc.ts",
     "docs": "typedoc src"
   },
   "keywords": [
@@ -28,7 +30,7 @@
   ],
   "author": "Fireblocks",
   "license": "ISC",
-  "description": "Cardano SDK for Fireblocks MPC custody",
+  "description": "Fireblocks Cardano Raw SDK with selectable IAGON and Demeter Blockfrost providers",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.6",
@@ -55,6 +57,7 @@
     "axios": "^1.10.0",
     "bech32": "^2.0.0",
     "blakejs": "^1.2.1",
+    "bip39": "^3.1.0",
     "cbor2": "^2.0.1",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",

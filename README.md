@@ -1,6 +1,42 @@
-# Cardano Raw SDK
+# Cardano Raw SDK — Demeter-enabled fork
 
-A TypeScript SDK for managing Cardano token transfers through Fireblocks, with integrated Iagon API services for balance queries, transaction history, and token operations.
+This fork of Fireblocks' Cardano Raw SDK preserves the existing IAGON integration
+and adds a selectable Demeter-hosted Blockfrost provider for Preview balance
+queries, UTxO selection, raw ADA transaction submission, and confirmation.
+
+## Demeter development runner
+
+The included development runner does not depend on Phantom. Local environment files
+remain ignored by Git.
+
+1. Add `DEMETER_API_KEY` to `.env.development` and set `RUN_LIVE_DEMETER=1`.
+2. Run `npm run poc:mock` to query Preview, build a 2 ADA transaction, and verify a
+   local witness. This mode never submits the transaction.
+3. Add the Fireblocks API key, secret, and `FIREBLOCKS_VAULT_ACCOUNT_ID`, then set
+   `RUN_LIVE_FIREBLOCKS=1` and run `npm run poc:fireblocks` to request raw signing,
+   submit through Demeter, and wait for confirmation.
+
+Both runners default to Preview. The Fireblocks runner refuses to operate on another
+network and cannot broadcast without the explicit `RUN_LIVE_FIREBLOCKS=1` guard.
+
+Library users select a provider during initialization:
+
+```ts
+const sdk = await FireblocksCardanoRawSDK.createInstance({
+  fireblocksConfig,
+  vaultAccountId,
+  network: Networks.PREVIEW,
+  chainProvider: {
+    type: "demeter",
+    baseUrl: process.env.DEMETER_BLOCKFROST_URL!,
+    apiKey: process.env.DEMETER_API_KEY!,
+  },
+});
+```
+
+Demeter currently implements the core transfer capability. IAGON-only account,
+history, staking, governance, pool, and asset-metadata calls fail with a typed
+`ProviderCapabilityError` when Demeter is selected.
 
 ## Features
 
@@ -55,17 +91,16 @@ A TypeScript SDK for managing Cardano token transfers through Fireblocks, with i
 
 ```bash
 # Install directly from GitHub
-npm install github:fireblocks/cardano-raw-sdk
+npm install github:verbotenj/cardano-raw-sdk
 
 # Or install a specific branch/tag
-npm install github:fireblocks/cardano-raw-sdk#main
-npm install github:fireblocks/cardano-raw-sdk#v1.0.0
+npm install github:verbotenj/cardano-raw-sdk#main
 ```
 
 **Or clone for development**:
 
 ```bash
-git clone https://github.com/fireblocks/cardano-raw-sdk.git
+git clone https://github.com/verbotenj/cardano-raw-sdk.git
 cd cardano-raw-sdk
 npm install
 npm run build

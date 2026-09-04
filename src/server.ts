@@ -9,14 +9,14 @@ import { getSwaggerSpec, swaggerUi } from "./utils/swagger.js";
 import { SdkManager } from "./pool/sdkManager.js";
 import { configureRouter } from "./api/router.js";
 import { FireblocksCardanoRawSDK } from "./FireblocksCardanoRawSDK.js";
-import { Networks } from "./types/index.js";
+import { ChainProviderConfig, Networks } from "./types/index.js";
 
 const logger = new Logger("app:server-setup");
 
 /**
  * Valid Cardano networks supported by this SDK
  */
-const VALID_NETWORKS: readonly string[] = ["mainnet", "preprod"] as const;
+const VALID_NETWORKS: readonly string[] = ["mainnet", "preprod", "preview"] as const;
 
 /**
  * Validate and parse CARDANO_NETWORK environment variable
@@ -31,18 +31,44 @@ const validateNetwork = (networkStr: string | undefined): Networks => {
     );
   }
 
-  return network === "mainnet" ? Networks.MAINNET : Networks.PREPROD;
+  if (network === "mainnet") return Networks.MAINNET;
+  if (network === "preview") return Networks.PREVIEW;
+  return Networks.PREPROD;
 };
 
 const startServer = () => {
   // Validate required environment variables for server mode
-  ["FIREBLOCKS_API_USER_KEY", "FIREBLOCKS_API_USER_SECRET_KEY_PATH", "IAGON_API_KEY"].forEach(
-    (key) => {
-      if (process.env[key] === undefined || process.env[key] === "") {
-        throw new Error(`Missing required environment variable: ${key}`);
-      }
+  if (!process.env.FIREBLOCKS_API_USER_KEY) {
+    throw new Error("Missing required environment variable: FIREBLOCKS_API_USER_KEY");
+  }
+  if (
+    !process.env.FIREBLOCKS_API_USER_SECRET_KEY_PATH &&
+    !process.env.FIREBLOCKS_API_USER_SECRET_KEY
+  ) {
+    throw new Error(
+      "FIREBLOCKS_API_USER_SECRET_KEY_PATH or FIREBLOCKS_API_USER_SECRET_KEY is required"
+    );
+  }
+
+  const providerType = (process.env.CHAIN_PROVIDER || "demeter").toLowerCase();
+  let chainProvider: ChainProviderConfig;
+  if (providerType === "demeter") {
+    if (!process.env.DEMETER_BLOCKFROST_URL || !process.env.DEMETER_API_KEY) {
+      throw new Error("DEMETER_BLOCKFROST_URL and DEMETER_API_KEY are required");
     }
-  );
+    chainProvider = {
+      type: "demeter",
+      baseUrl: process.env.DEMETER_BLOCKFROST_URL,
+      apiKey: process.env.DEMETER_API_KEY,
+    };
+  } else if (providerType === "iagon") {
+    if (!process.env.IAGON_API_KEY) {
+      throw new Error("IAGON_API_KEY is required when CHAIN_PROVIDER=iagon");
+    }
+    chainProvider = { type: "iagon", apiKey: process.env.IAGON_API_KEY };
+  } else {
+    throw new Error("CHAIN_PROVIDER must be either 'demeter' or 'iagon'");
+  }
 
   const app = express();
 
@@ -71,9 +97,6 @@ const startServer = () => {
   // Get and validate network from environment variable
   const network = validateNetwork(process.env.CARDANO_NETWORK);
 
-  // Get Iagon API key from environment variable
-  const iagonApiKey = process.env.IAGON_API_KEY || "";
-
   // Initialize SDK Manager with pool configuration
   const sdkManager = new SdkManager(
     baseConfig,
@@ -92,7 +115,7 @@ const startServer = () => {
         fireblocksConfig,
         vaultAccountId,
         network,
-        iagonApiKey,
+        chainProvider,
       })
   );
 

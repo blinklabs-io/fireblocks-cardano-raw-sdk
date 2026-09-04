@@ -3,7 +3,8 @@ import { BasePath, ConfigurationOptions as FireblocksConfig } from "@fireblocks/
 import dotenv from "dotenv";
 import { Logger } from "./logger.js";
 
-// Load dotenv but don't initialize config yet
+// Prefer the POC's private development environment while retaining .env compatibility.
+dotenv.config({ path: process.env.CARDANO_ENV_FILE || ".env.development" });
 dotenv.config();
 
 const logger = new Logger("utils:config");
@@ -96,7 +97,9 @@ const loadConfigFromEnv = (): Config => {
     FIREBLOCKS: {
       apiKey: process.env.FIREBLOCKS_API_USER_KEY || "",
       secretKey: getSecretKey(),
-      basePath: validateBasePath(process.env.BASE_PATH || ""),
+      basePath: validateBasePath(
+        process.env.FIREBLOCKS_BASE_PATH || process.env.BASE_PATH || ""
+      ),
     },
     APP_NAME: process.env.APP_NAME || "cardano-raw-sdk",
   };

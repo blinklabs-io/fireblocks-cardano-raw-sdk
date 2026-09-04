@@ -23,6 +23,7 @@ package-lock.json
 
 .env
 .env.test
+.env.development
 
 .env.local
 .env.*.local

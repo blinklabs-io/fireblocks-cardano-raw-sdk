@@ -92,9 +92,18 @@ import {
   ConsolidateUtxosOpts,
   ConsolidateUtxosResult,
   ConsolidateBatchResult,
+  CardanoDataProvider,
+  ChainProviderCapability,
+  ChainProviderConfig,
+  ProviderCapabilityError,
 } from "./types/index.js";
 
-import { FireblocksService, IagonApiService, StakingService } from "./services/index.js";
+import {
+  DemeterBlockfrostProvider,
+  FireblocksService,
+  IagonApiService,
+  StakingService,
+} from "./services/index.js";
 import { CardanoAmounts, CardanoConstants, FireblocksWebhookConstants } from "./constants.js";
 
 import {
@@ -116,16 +125,18 @@ import { createRemoteJWKSet, compactVerify } from "jose";
 export interface SDKConfig {
   vaultAccountId: string;
   fireblocksService: FireblocksService;
-  iagonApiService: IagonApiService;
-  stakingService: StakingService;
+  chainProvider: CardanoDataProvider;
+  iagonApiService?: IagonApiService;
+  stakingService?: StakingService;
   network: Networks;
   logger: Logger;
 }
 
 export class FireblocksCardanoRawSDK {
   private readonly fireblocksService: FireblocksService;
-  private readonly iagonApiService: IagonApiService;
-  private readonly stakingService: StakingService;
+  private readonly chainProvider: CardanoDataProvider;
+  private readonly iagonApiService?: IagonApiService;
+  private readonly stakingService?: StakingService;
   private network: Networks;
   private vaultAccountId: string;
   private addresses: Map<number, string> = new Map();
@@ -142,6 +153,7 @@ export class FireblocksCardanoRawSDK {
     this.logger = config.logger;
 
     this.fireblocksService = config.fireblocksService;
+    this.chainProvider = config.chainProvider;
     this.iagonApiService = config.iagonApiService;
     this.stakingService = config.stakingService;
     this.network = config.network;
@@ -159,11 +171,30 @@ export class FireblocksCardanoRawSDK {
     return this.network === Networks.MAINNET ? SupportedAssets.ADA : SupportedAssets.ADA_TEST;
   }
 
+  private requireIagonProvider(capability: ChainProviderCapability): IagonApiService {
+    if (!this.iagonApiService) {
+      throw new ProviderCapabilityError(this.chainProvider.kind, capability);
+    }
+    return this.iagonApiService;
+  }
+
+  private requireStakingService(
+    capability: ChainProviderCapability = ChainProviderCapability.STAKING
+  ): StakingService {
+    if (!this.stakingService) {
+      throw new ProviderCapabilityError(this.chainProvider.kind, capability);
+    }
+    return this.stakingService;
+  }
+
   public static createInstance = async (params: {
     fireblocksConfig: ConfigurationOptions;
     vaultAccountId: string;
     network: Networks;
-    iagonApiKey: string;
+    /** Select the Cardano chain-data provider. */
+    chainProvider?: ChainProviderConfig;
+    /** @deprecated Use chainProvider: { type: "iagon", apiKey } instead. */
+    iagonApiKey?: string;
     /** Asset metadata cache TTL in milliseconds (default: 1 hour) */
     assetCacheTTL?: number;
     /** Disable SSL certificate verification (use only in development) */
@@ -176,23 +207,41 @@ export class FireblocksCardanoRawSDK {
         fireblocksConfig,
         vaultAccountId,
         network,
+        chainProvider: providerConfig,
         iagonApiKey,
         assetCacheTTL,
         disableSslVerification = false,
       } = params;
 
-      if (network === Networks.PREVIEW) {
-        throw new Error(`Unsupported network: ${network}`);
-      }
-
       const fireblocksService = new FireblocksService(fireblocksConfig);
-      const iagonApiService = new IagonApiService(
-        iagonApiKey,
-        network,
-        assetCacheTTL,
-        disableSslVerification
-      );
-      const stakingService = new StakingService(fireblocksService, iagonApiService, network);
+      const resolvedProviderConfig: ChainProviderConfig =
+        providerConfig ?? {
+          type: "iagon",
+          apiKey: iagonApiKey ?? "",
+          assetCacheTTL,
+          disableSslVerification,
+        };
+      let iagonApiService: IagonApiService | undefined;
+      let chainDataProvider: CardanoDataProvider;
+      if (resolvedProviderConfig.type === "iagon") {
+        iagonApiService = new IagonApiService(
+          resolvedProviderConfig.apiKey,
+          network,
+          resolvedProviderConfig.assetCacheTTL,
+          resolvedProviderConfig.disableSslVerification
+        );
+        chainDataProvider = iagonApiService;
+      } else {
+        chainDataProvider = new DemeterBlockfrostProvider({
+          baseUrl: resolvedProviderConfig.baseUrl,
+          apiKey: resolvedProviderConfig.apiKey,
+          maxRetries: resolvedProviderConfig.maxRetries,
+          pageSize: resolvedProviderConfig.pageSize,
+        });
+      }
+      const stakingService = iagonApiService
+        ? new StakingService(fireblocksService, iagonApiService, network)
+        : undefined;
       const assetId = network === Networks.MAINNET ? SupportedAssets.ADA : SupportedAssets.ADA_TEST;
       const wallet = await fireblocksService.getVaultAccountAddress(vaultAccountId, assetId);
 
@@ -206,6 +255,7 @@ export class FireblocksCardanoRawSDK {
 
       const sdkInstance = new FireblocksCardanoRawSDK({
         fireblocksService,
+        chainProvider: chainDataProvider,
         iagonApiService,
         stakingService,
         network,
@@ -222,8 +272,19 @@ export class FireblocksCardanoRawSDK {
     }
   };
 
+  public checkProviderHealth = async (): Promise<HealthStatusResponse> => {
+    return await this.chainProvider.checkHealth();
+  };
+
+  /** @deprecated Use checkProviderHealth(). */
   public checkIagonHealth = async (): Promise<HealthStatusResponse> => {
-    return await this.iagonApiService.checkHealth();
+    if (this.chainProvider.kind !== "iagon") {
+      throw new ProviderCapabilityError(
+        this.chainProvider.kind,
+        ChainProviderCapability.IAGON_COMPATIBILITY
+      );
+    }
+    return await this.chainProvider.checkHealth();
   };
 
   /**
@@ -244,7 +305,7 @@ export class FireblocksCardanoRawSDK {
       `Getting balance for address ${address} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`
     );
 
-    const response = await this.iagonApiService.getBalanceByAddress({
+    const response = await this.chainProvider.getBalanceByAddress({
       address,
       groupByPolicy,
     });
@@ -291,7 +352,7 @@ export class FireblocksCardanoRawSDK {
         const index = addrData.bip44AddressIndex || 0;
 
         try {
-          const balance = await this.iagonApiService.getBalanceByAddress({
+          const balance = await this.chainProvider.getBalanceByAddress({
             address,
             groupByPolicy: groupBy === GroupByOptions.POLICY,
           });
@@ -325,7 +386,9 @@ export class FireblocksCardanoRawSDK {
       `Getting balance for credential ${credential} (includeMetadata: ${includeMetadata})`
     );
 
-    const response = await this.iagonApiService.getBalanceByCredential({
+    const response = await this.requireIagonProvider(
+      ChainProviderCapability.ACCOUNT_QUERIES
+    ).getBalanceByCredential({
       credential,
       groupByPolicy,
     });
@@ -363,7 +426,9 @@ export class FireblocksCardanoRawSDK {
       `Getting balance for stake key ${stakeKey} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`
     );
 
-    const response = await this.iagonApiService.getBalanceByStakeKey({
+    const response = await this.requireIagonProvider(
+      ChainProviderCapability.ACCOUNT_QUERIES
+    ).getBalanceByStakeKey({
       stakeKey,
       groupByPolicy,
     });
@@ -471,9 +536,9 @@ export class FireblocksCardanoRawSDK {
    * Fetches current network slot and returns TTL for transaction building.
    */
   private async fetchCurrentTtl(): Promise<number> {
-    const epochResponse = await this.iagonApiService.getCurrentEpoch();
-    this.logger.info(`Current slot: ${epochResponse.data.tip.slot}, calculating TTL`);
-    return calculateTtl(epochResponse.data.tip.slot);
+    const currentSlot = await this.chainProvider.getCurrentSlot();
+    this.logger.info(`Current slot: ${currentSlot}, calculating TTL`);
+    return calculateTtl(currentSlot);
   }
 
   /**
@@ -602,7 +667,7 @@ export class FireblocksCardanoRawSDK {
   public getTransactionDetails = async (
     hash: string
   ): Promise<TransactionDetailsResponse | null> => {
-    return await this.iagonApiService.getTransactionDetails(hash);
+    return await this.chainProvider.getTransactionDetails(hash);
   };
 
   /**
@@ -615,7 +680,7 @@ export class FireblocksCardanoRawSDK {
       `Getting UTXOs for vault ${this.vaultAccountId} at index ${index} (address: ${address})`
     );
 
-    return await this.iagonApiService.getUtxosByAddress(address);
+    return await this.chainProvider.getUtxosByAddress(address);
   };
 
   /**
@@ -637,7 +702,7 @@ export class FireblocksCardanoRawSDK {
 
     const results = await Promise.all(
       addresses.map(async (addr) => {
-        const response = await this.iagonApiService.getUtxosByAddress(addr.address!);
+        const response = await this.chainProvider.getUtxosByAddress(addr.address!);
         return {
           index: addr.bip44AddressIndex ?? 0,
           address: addr.address!,
@@ -665,7 +730,10 @@ export class FireblocksCardanoRawSDK {
       `Getting transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`
     );
 
-    return await this.iagonApiService.getTransactionHistory({ address, ...options });
+    return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory({
+      address,
+      ...options,
+    });
   };
 
   /**
@@ -685,7 +753,10 @@ export class FireblocksCardanoRawSDK {
       `Getting detailed transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`
     );
 
-    return await this.iagonApiService.getDetailedTxHistory({ address, ...options });
+    return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory({
+      address,
+      ...options,
+    });
   };
 
   /**
@@ -704,7 +775,8 @@ export class FireblocksCardanoRawSDK {
       `Getting transaction history for all addresses in vault ${this.vaultAccountId}`
     );
     return this.fetchAllVaultHistory<TransactionHistoryItem>(
-      (params) => this.iagonApiService.getTransactionHistory(params),
+      (params) =>
+        this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory(params),
       options
     ) as Promise<TransactionHistoryResponse | GroupedTransactionHistoryResponse>;
   };
@@ -725,7 +797,8 @@ export class FireblocksCardanoRawSDK {
       `Getting detailed transaction history for all addresses in vault ${this.vaultAccountId}`
     );
     return this.fetchAllVaultHistory<DetailedTransaction>(
-      (params) => this.iagonApiService.getDetailedTxHistory(params),
+      (params) =>
+        this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory(params),
       options
     ) as Promise<DetailedTxHistoryResponse | GroupedDetailedTxHistoryResponse>;
   };
@@ -743,7 +816,7 @@ export class FireblocksCardanoRawSDK {
     lock?: boolean;
   }) {
     const utxoResult = await fetchAndSelectUtxosForCnt({
-      iagonApiService: this.iagonApiService,
+      chainProvider: this.chainProvider,
       ...params,
     });
 
@@ -1162,7 +1235,7 @@ export class FireblocksCardanoRawSDK {
       const signedTransaction = await this.signTransaction(txBody);
 
       // Submit transaction to blockchain
-      const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+      const txHash = await submitTransaction(this.chainProvider, signedTransaction);
 
       this.logger.info(`Transfer successful: ${txHash} (fee: ${feeFormatted.value} ADA)`);
 
@@ -1235,7 +1308,7 @@ export class FireblocksCardanoRawSDK {
     // Select UTxOs - prefer ADA-only, fall back to multi-asset if needed
     const { selectedUtxos, accumulatedAda, changeTokenAssets, minChangeLovelace } =
       await fetchAndSelectUtxosForAda({
-        iagonApiService: this.iagonApiService,
+        chainProvider: this.chainProvider,
         address: senderAddress,
         lovelaceAmount,
         transactionFee: CardanoAmounts.ESTIMATED_MAX_FEE,
@@ -1382,6 +1455,31 @@ export class FireblocksCardanoRawSDK {
         `Initiating ADA transfer: ${lovelaceAmount} lovelace to ${recipientAddress ?? `vault ${recipientVaultAccountId}`}`
       );
 
+      if (this.chainProvider.kind === "demeter") {
+        const prepared = await this.prepareAdaTransaction(options);
+        const signedTransaction = await this.signTransaction(prepared.txBody, this.assetId);
+        try {
+          const txHash = await submitTransaction(this.chainProvider, signedTransaction);
+          const feeFormatted = formatWithDecimals(
+            prepared.fee,
+            CardanoConstants.ADA_DECIMALS
+          );
+          return {
+            txHash,
+            senderAddress: prepared.senderAddress,
+            recipientAddress: prepared.resolvedRecipientAddress,
+            lovelaceAmount,
+            fee: { lovelace: prepared.fee.toString(), ada: feeFormatted.value },
+            ...(Object.keys(prepared.changeTokenAssets).length > 0 && {
+              tokensPresentedInChange: Object.keys(prepared.changeTokenAssets),
+            }),
+          };
+        } finally {
+          signedTransaction.free();
+          prepared.txBody.free();
+        }
+      }
+
       const senderAddress = await this.getAddressByIndex(this.assetId, index);
       const resolvedRecipientAddress = await this.resolveRecipientAddress(
         recipientAddress,
@@ -1491,7 +1589,7 @@ export class FireblocksCardanoRawSDK {
 
     const { selectedUtxos, accumulatedAda, changeTokenAssets, minChangeLovelace, release } =
       await fetchAndSelectUtxosForMultiToken({
-        iagonApiService: this.iagonApiService,
+        chainProvider: this.chainProvider,
         address: senderAddress,
         tokens,
         transactionFee: CardanoAmounts.ESTIMATED_MAX_FEE,
@@ -1657,7 +1755,7 @@ export class FireblocksCardanoRawSDK {
       );
 
       const signedTransaction = await this.signTransaction(txBody);
-      const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+      const txHash = await submitTransaction(this.chainProvider, signedTransaction);
 
       this.logger.info(
         `Multi-token transfer successful: ${txHash} (fee: ${feeFormatted.value} ADA)`
@@ -1721,7 +1819,7 @@ export class FireblocksCardanoRawSDK {
     const senderAddress = await this.getAddressByIndex(this.assetId, index);
     this.logger.info(`Consolidating UTxOs at address index ${index}: ${senderAddress}`);
 
-    const rawUtxos = await fetchUtxos(this.iagonApiService, senderAddress);
+    const rawUtxos = await fetchUtxos(this.chainProvider, senderAddress);
     const initialUtxos = rawUtxos.filter(
       (u) => !utxoLocks.isLocked(u.transaction_id, u.output_index)
     );
@@ -1776,7 +1874,7 @@ export class FireblocksCardanoRawSDK {
       );
 
       const signedTransaction = await this.signTransaction(txBody);
-      const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+      const txHash = await submitTransaction(this.chainProvider, signedTransaction);
       this.logger.info(`UTxO consolidation successful: ${txHash}`);
 
       const { lovelace: outputLovelace, tokenPolicies } = this.extractOutputMetadata(outputs[0]);
@@ -1809,7 +1907,7 @@ export class FireblocksCardanoRawSDK {
 
     for (let batchNum = 0; batchNum < maxBatches; batchNum++) {
       // re-fetch UTxOs after each batch to get fresh state
-      const utxos = await fetchUtxos(this.iagonApiService, senderAddress);
+      const utxos = await fetchUtxos(this.chainProvider, senderAddress);
 
       // stop if we've consolidated enough (only 1 UTxO left or below threshold)
       if (utxos.length < minUtxoCount) {
@@ -1839,7 +1937,7 @@ export class FireblocksCardanoRawSDK {
         );
 
         const signedTransaction = await this.signTransaction(txBody);
-        const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+        const txHash = await submitTransaction(this.chainProvider, signedTransaction);
 
         batches.push({
           txHash,
@@ -1876,7 +1974,7 @@ export class FireblocksCardanoRawSDK {
     }
 
     // get final state for output metadata
-    const finalUtxos = await fetchUtxos(this.iagonApiService, senderAddress);
+    const finalUtxos = await fetchUtxos(this.chainProvider, senderAddress);
     const tokenPolicies = this.extractTokenPoliciesFromUtxos(finalUtxos);
     const totalLovelace = finalUtxos.reduce((sum, u) => sum + u.value.lovelace, 0);
     const totalFeeFormatted = formatWithDecimals(totalFeeLovelace, CardanoConstants.ADA_DECIMALS);
@@ -2141,7 +2239,7 @@ export class FireblocksCardanoRawSDK {
 
     this.logger.info(`Enriching webhook payload for ADA transaction: ${txHash}`);
 
-    const detailedTx = await this.iagonApiService.getTransactionDetails(txHash);
+    const detailedTx = await this.chainProvider.getTransactionDetails(txHash);
 
     if (!detailedTx) {
       this.logger.warn(`Transaction not found: ${txHash}`);
@@ -2216,7 +2314,9 @@ export class FireblocksCardanoRawSDK {
           return null;
         }
 
-        const assetInfo = await this.iagonApiService.getAssetInfo(policyId, assetName);
+        const assetInfo = await this.requireIagonProvider(
+          ChainProviderCapability.ASSET_METADATA
+        ).getAssetInfo(policyId, assetName);
         const amount = amounts.get(assetId) || "0";
         const decimals = assetInfo.data.metadata?.decimals || 0;
         const amountNumber = Number(amount);
@@ -2626,7 +2726,7 @@ export class FireblocksCardanoRawSDK {
    * @internal - For advanced usage only
    */
   public getIagonApiService(): IagonApiService {
-    return this.iagonApiService;
+    return this.requireIagonProvider(ChainProviderCapability.IAGON_COMPATIBILITY);
   }
 
   /**
@@ -2634,7 +2734,7 @@ export class FireblocksCardanoRawSDK {
    * @internal - For advanced usage only
    */
   public getStakingService(): StakingService {
-    return this.stakingService;
+    return this.requireStakingService();
   }
 
   // ======================
@@ -2667,7 +2767,7 @@ export class FireblocksCardanoRawSDK {
     (StakingTransactionResult & { stakeAddress: string; addressIndex: number }) | null
   > => {
     this.logger.info(`Registering staking credential for vault account ${options.vaultAccountId}`);
-    return await this.stakingService.registerStakingCredential(options);
+    return await this.requireStakingService().registerStakingCredential(options);
   };
 
   /**
@@ -2697,7 +2797,7 @@ export class FireblocksCardanoRawSDK {
 
     const { vaultAccountId, poolId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    return await this.stakingService.delegateToPool({ vaultAccountId, poolId, fee });
+    return await this.requireStakingService().delegateToPool({ vaultAccountId, poolId, fee });
   };
 
   /**
@@ -2727,7 +2827,7 @@ export class FireblocksCardanoRawSDK {
     );
     const { vaultAccountId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    return await this.stakingService.deregisterStakingCredential({ vaultAccountId, fee });
+    return await this.requireStakingService().deregisterStakingCredential({ vaultAccountId, fee });
   };
 
   /**
@@ -2767,19 +2867,21 @@ export class FireblocksCardanoRawSDK {
     this.logger.info(`Withdrawing rewards for vault account ${options.vaultAccountId}`);
     const { vaultAccountId, limit, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    return await this.stakingService.withdrawRewards({ vaultAccountId, limit, fee });
+    return await this.requireStakingService().withdrawRewards({ vaultAccountId, limit, fee });
   };
 
   public getStakeAccountInfo = async (vaultAccountId: string): Promise<StakeAccountInfo> => {
     this.logger.info(`Getting staking account info for vault account ${vaultAccountId}`);
 
-    const stakeAddress = await this.stakingService.getStakeAddress(vaultAccountId);
-    const response = await this.iagonApiService.getStakeAccountInfo(stakeAddress);
+    const stakeAddress = await this.requireStakingService().getStakeAddress(vaultAccountId);
+    const response = await this.requireIagonProvider(
+      ChainProviderCapability.STAKING
+    ).getStakeAccountInfo(stakeAddress);
     return response.data;
   };
 
   public getCurrentEpoch = async (): Promise<CurrentEpochResponse> => {
-    return await this.iagonApiService.getCurrentEpoch();
+    return await this.requireIagonProvider(ChainProviderCapability.STAKING).getCurrentEpoch();
   };
 
   /**
@@ -2809,7 +2911,7 @@ export class FireblocksCardanoRawSDK {
    */
   public queryStakingRewards = async (vaultAccountId: string): Promise<RewardsData> => {
     this.logger.info(`Querying staking rewards for vault account ${vaultAccountId}`);
-    return await this.stakingService.queryStakingRewards(vaultAccountId);
+    return await this.requireStakingService().queryStakingRewards(vaultAccountId);
   };
 
   /**
@@ -2874,7 +2976,9 @@ export class FireblocksCardanoRawSDK {
    */
   public registerAsDRep = async (options: RegisterAsDRepOptions): Promise<RegisterAsDRepResult> => {
     this.logger.info(`Registering vault account ${options.vaultAccountId} as a DRep`);
-    return await this.stakingService.registerAsDRep(options);
+    return await this.requireStakingService(
+      ChainProviderCapability.GOVERNANCE
+    ).registerAsDRep(options);
   };
 
   /**
@@ -2903,7 +3007,7 @@ export class FireblocksCardanoRawSDK {
     this.logger.info(
       `Casting vote "${options.vote}" on governance action ${options.governanceActionId.txHash}#${options.governanceActionId.index}`
     );
-    return await this.stakingService.castVote(options);
+    return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).castVote(options);
   };
 
   public delegateToDRep = async (
@@ -2915,7 +3019,12 @@ export class FireblocksCardanoRawSDK {
 
     const { vaultAccountId, drepAction, drepId, fee = CardanoAmounts.GOVERNANCE_TX_FEE } = options;
 
-    return await this.stakingService.delegateToDRep({ vaultAccountId, drepAction, drepId, fee });
+    return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).delegateToDRep({
+      vaultAccountId,
+      drepAction,
+      drepId,
+      fee,
+    });
   };
 
   /**
@@ -2938,7 +3047,7 @@ export class FireblocksCardanoRawSDK {
    */
   public getStakeAddress = async (vaultAccountId: string): Promise<string> => {
     this.logger.info(`Getting stake address for vault account ${vaultAccountId}`);
-    return await this.stakingService.getStakeAddress(vaultAccountId);
+    return await this.requireStakingService().getStakeAddress(vaultAccountId);
   };
 
   /**
@@ -2981,7 +3090,11 @@ export class FireblocksCardanoRawSDK {
     skipCache: boolean = false
   ): Promise<AssetInfoResponse> {
     this.logger.info(`Getting asset info for ${policyId}.${assetName}`);
-    return await this.iagonApiService.getAssetInfo(policyId, assetName, skipCache);
+    return await this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).getAssetInfo(
+      policyId,
+      assetName,
+      skipCache
+    );
   }
 
   /**
@@ -2994,7 +3107,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolInfo(poolId: string): Promise<PoolInfoResponse> {
     this.logger.info(`Getting pool info for ${poolId}`);
-    return await this.iagonApiService.getPoolInfo(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolInfo(poolId);
   }
 
   /**
@@ -3003,7 +3116,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolMetadata(poolId: string): Promise<PoolMetadataResponse> {
     this.logger.info(`Getting pool metadata for ${poolId}`);
-    return await this.iagonApiService.getPoolMetadata(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolMetadata(poolId);
   }
 
   /**
@@ -3012,7 +3125,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolDelegators(poolId: string): Promise<PoolDelegatorsResponse> {
     this.logger.info(`Getting pool delegators for ${poolId}`);
-    return await this.iagonApiService.getPoolDelegators(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolDelegators(poolId);
   }
 
   /**
@@ -3027,7 +3140,9 @@ export class FireblocksCardanoRawSDK {
     offset?: number
   ): Promise<PoolDelegatorsListResponse> {
     this.logger.info(`Getting pool delegators list for ${poolId}`);
-    return await this.iagonApiService.getPoolDelegatorsList(poolId, limit, offset);
+    return await this.requireIagonProvider(
+      ChainProviderCapability.POOLS
+    ).getPoolDelegatorsList(poolId, limit, offset);
   }
 
   /**
@@ -3036,7 +3151,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolBlocks(poolId: string): Promise<PoolBlocksResponse> {
     this.logger.info(`Getting pool blocks for ${poolId}`);
-    return await this.iagonApiService.getPoolBlocks(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolBlocks(poolId);
   }
 
   /**
@@ -3057,7 +3172,10 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public clearAssetInfoCache(policyId?: string, assetName?: string): void {
-    this.iagonApiService.clearAssetInfoCache(policyId, assetName);
+    this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).clearAssetInfoCache(
+      policyId,
+      assetName
+    );
   }
 
   /**
@@ -3074,7 +3192,9 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public getAssetCacheStats() {
-    return this.iagonApiService.getAssetCacheStats();
+    return this.requireIagonProvider(
+      ChainProviderCapability.ASSET_METADATA
+    ).getAssetCacheStats();
   }
 
   /**
