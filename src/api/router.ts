@@ -32,6 +32,8 @@ export const configureRouter = (sdkManager: SdkManager): Router => {
   const router: Router = Router();
   const apiController = new ApiController(sdkManager);
 
+  router.get("/services/provider/health", apiController.getProviderHealth);
+
   /**
    * IAGON HEALTH CHECK
    */

@@ -26,7 +26,7 @@ export class TransactionLogger {
       this.logger.info(`Sorted Witness ${i} - Signature: ${w.signature.toString("hex")}`);
     });
 
-    this.logger.info(`Final signed TX (hex): ${signedTx.toString("hex")}`);
+    this.logger.info(`Final signed transaction size: ${signedTx.length} CBOR bytes`);
     this.logger.info("===========================");
   }
 }

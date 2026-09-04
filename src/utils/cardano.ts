@@ -18,7 +18,7 @@ import {
   min_ada_for_output,
   DataCost,
 } from "@emurgo/cardano-serialization-lib-nodejs";
-import { IagonApiService } from "../services/index.js";
+import { CardanoDataProvider } from "../types/providers.js";
 import {
   CntTransactionOutputsParams,
   MultiTokenTransactionOutputsParams,
@@ -130,7 +130,7 @@ export const calculateTransactionFee = (tx: Transaction): number => {
 
 export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCntParams) => {
   const {
-    iagonApiService,
+    chainProvider,
     address,
     tokenPolicyId,
     requiredTokenAmount,
@@ -139,7 +139,7 @@ export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCn
     lock = false,
   } = params;
   try {
-    const rawUtxos = await fetchUtxos(iagonApiService, address);
+    const rawUtxos = await fetchUtxos(chainProvider, address);
     const utxos = rawUtxos.filter((u) => !utxoLocks.isLocked(u.transaction_id, u.output_index));
 
     const tokenUtxosWithAmounts = filterUtxos(utxos, tokenPolicyId, tokenName)
@@ -249,12 +249,12 @@ export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCn
 };
 
 export const fetchUtxos = async (
-  iagonApiService: IagonApiService,
+  chainProvider: CardanoDataProvider,
   address: string
 ): Promise<UtxoData[]> => {
   try {
     logger.info(`Fetching UTXOs for address: ${address}`);
-    const response = await iagonApiService.getUtxosByAddress(address);
+    const response = await chainProvider.getUtxosByAddress(address);
 
     logger.info(`API Response:`, JSON.stringify(response, null, 2));
 
@@ -559,19 +559,15 @@ export const buildTransaction = ({
 };
 
 export const submitTransaction = async (
-  iagonApiService: IagonApiService,
+  chainProvider: CardanoDataProvider,
   signedTx: Transaction
 ): Promise<string> => {
   try {
     const txCbor = Buffer.from(signedTx.to_bytes()).toString("hex");
 
-    logger.info(`=== TRANSACTION CBOR DEBUG ===`);
-    logger.info(`CBOR length: ${txCbor.length} chars (${txCbor.length / 2} bytes)`);
-    logger.info(`CBOR hex (first 200 chars): ${txCbor.substring(0, 200)}`);
-    logger.info(`CBOR hex (full): ${txCbor}`);
+    logger.info(`Submitting signed transaction (${txCbor.length / 2} CBOR bytes)`);
 
-    // Submit transaction using Iagon API
-    const response = await iagonApiService.submitTransfer(txCbor, false);
+    const response = await chainProvider.submitTransfer(txCbor, false);
 
     if (response.success) {
       logger.info(`Transaction successfully submitted. Transaction ID: ${response.data.txHash}`);
@@ -751,9 +747,9 @@ export const fetchAndSelectUtxosForAda = async (
   minChangeLovelace: number;
   release: () => void;
 }> => {
-  const { iagonApiService, address, lovelaceAmount, transactionFee, lock = false } = params;
+  const { chainProvider, address, lovelaceAmount, transactionFee, lock = false } = params;
 
-  const rawUtxos = await fetchUtxos(iagonApiService, address);
+  const rawUtxos = await fetchUtxos(chainProvider, address);
   const utxos = rawUtxos.filter((u) => !utxoLocks.isLocked(u.transaction_id, u.output_index));
   if (!utxos || utxos.length === 0) {
     throw new Error(`No UTxOs found for address: ${address}`);
@@ -930,9 +926,9 @@ export const fetchAndSelectUtxosForMultiToken = async (
   minChangeLovelace: number;
   release: () => void;
 }> => {
-  const { iagonApiService, address, tokens, transactionFee, lovelaceAmount, lock = false } = params;
+  const { chainProvider, address, tokens, transactionFee, lovelaceAmount, lock = false } = params;
 
-  const rawUtxos = await fetchUtxos(iagonApiService, address);
+  const rawUtxos = await fetchUtxos(chainProvider, address);
   const utxos = rawUtxos.filter((u) => !utxoLocks.isLocked(u.transaction_id, u.output_index));
   if (!utxos || utxos.length === 0) {
     throw new Error(`No UTxOs found for address: ${address}`);

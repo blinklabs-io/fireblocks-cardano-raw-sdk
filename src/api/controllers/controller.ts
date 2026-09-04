@@ -79,6 +79,16 @@ export class ApiController {
     }
   };
 
+  public getProviderHealth = async (_req: Request, res: Response) => {
+    try {
+      const result = await this.sdkManager.withSdk("0", (sdk) => sdk.checkProviderHealth());
+      this.logger.info("Chain provider health check completed");
+      ok(res, result);
+    } catch (error: unknown) {
+      this.handleError(error, res, "getProviderHealth");
+    }
+  };
+
   public getBalanceByAddress = async (req: Request, res: Response) => {
     const { vaultAccountId } = req.params as { vaultAccountId: string };
     const { index } = req.query as unknown as AddressQuery;
