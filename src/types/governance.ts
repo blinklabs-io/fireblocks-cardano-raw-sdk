@@ -10,6 +10,8 @@ export interface FireblocksGovernanceRequirements {
   minimumApprovals: number;
   /** Minimum Fireblocks signers required in the completed signing response. */
   minimumSigners: number;
+  /** Fireblocks user IDs permitted to appear in the terminal signedBy evidence. */
+  allowedSignerIds: string[];
 }
 
 export interface GovernanceAuthorizationGroupEvidence {
@@ -39,6 +41,8 @@ export interface FireblocksGovernanceEvidence {
     approvedAuthorizers: number;
     signerCount: number;
     designatedSignerEvidencePresent: true;
+    configuredDesignatedSignerCount: number;
+    allSignersDesignated: true;
     minimumApprovals: number;
     minimumSigners: number;
     requirementsSatisfied: true;
@@ -59,5 +63,5 @@ export interface FireblocksGovernanceEvidence {
   signatureVerified: true;
   signerMatchesSource: true;
   transactionBodyUnchanged: true;
-  onChainHashMatchesBody: true;
+  demeterSubmissionHashMatchesBody: true;
 }

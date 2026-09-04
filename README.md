@@ -67,6 +67,7 @@ const result = await sdk.transferAda({
     maxFeeLovelace: 300_000,
     minimumApprovals: 1,
     minimumSigners: 1,
+    allowedSignerIds: [process.env.FIREBLOCKS_DESIGNATED_SIGNER_ID!],
   },
 });
 

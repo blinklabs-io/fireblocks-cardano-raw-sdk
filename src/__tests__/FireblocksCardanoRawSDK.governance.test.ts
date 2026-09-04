@@ -31,7 +31,11 @@ describe("Fireblocks governed ADA transfer", () => {
   beforeAll(() => Logger.setLogLevel(LogLevel.NONE));
 
   const createHarness = (
-    authorizationStatus: "APPROVED" | "PENDING_AUTHORIZATION" = "APPROVED"
+    authorizationStatus: "APPROVED" | "PENDING_AUTHORIZATION" = "APPROVED",
+    signerId = "designated-signer",
+    transactionResponseId = "fireblocks-tx-123",
+    fireblocksStatus = "COMPLETED",
+    invalidSignature = false
   ) => {
     const paymentKey = PrivateKey.generate_ed25519();
     const stakeKey = PrivateKey.generate_ed25519();
@@ -73,7 +77,9 @@ describe("Fireblocks governed ADA transfer", () => {
 
     const signTransaction = jest.fn(async (payload: any) => {
       const content = payload.extraParameters.rawMessageData.messages[0].content as string;
-      const signature = paymentKey.sign(Buffer.from(content, "hex"));
+      const signature = (invalidSignature ? PrivateKey.generate_ed25519() : paymentKey).sign(
+        Buffer.from(content, "hex")
+      );
       return {
         id: "fireblocks-tx-123",
         data: [
@@ -84,10 +90,10 @@ describe("Fireblocks governed ADA transfer", () => {
           },
         ],
         transaction: {
-          id: "fireblocks-tx-123",
+          id: transactionResponseId,
           externalTxId: payload.externalTxId,
-          status: "COMPLETED",
-          signedBy: ["designated-signer"],
+          status: fireblocksStatus,
+          signedBy: [signerId],
           authorizationInfo: {
             logic: "AND",
             allowOperatorAsAuthorizer: false,
@@ -131,6 +137,7 @@ describe("Fireblocks governed ADA transfer", () => {
         maxFeeLovelace: 200_000,
         minimumApprovals: 1,
         minimumSigners: 1,
+        allowedSignerIds: ["designated-signer"],
       },
     });
 
@@ -143,11 +150,13 @@ describe("Fireblocks governed ADA transfer", () => {
       signatureVerified: true,
       signerMatchesSource: true,
       transactionBodyUnchanged: true,
-      onChainHashMatchesBody: true,
+      demeterSubmissionHashMatchesBody: true,
       matchedPolicy: {
         authorizationInfoPresent: true,
         approvedAuthorizers: 1,
         signerCount: 1,
+        configuredDesignatedSignerCount: 1,
+        allSignersDesignated: true,
         requirementsSatisfied: true,
       },
       preflight: {
@@ -180,6 +189,7 @@ describe("Fireblocks governed ADA transfer", () => {
           maxFeeLovelace: 200_000,
           minimumApprovals: 1,
           minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
         },
       })
     ).rejects.toMatchObject({ errorType: "GovernanceRecipientBlocked" });
@@ -199,6 +209,7 @@ describe("Fireblocks governed ADA transfer", () => {
           maxFeeLovelace: 200_000,
           minimumApprovals: 1,
           minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
         },
       })
     ).rejects.toMatchObject({ errorType: "GovernanceApprovalInsufficient" });
@@ -217,6 +228,7 @@ describe("Fireblocks governed ADA transfer", () => {
           maxFeeLovelace: 1,
           minimumApprovals: 1,
           minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
         },
       })
     ).rejects.toMatchObject({ errorType: "GovernanceFeeBlocked" });
@@ -236,9 +248,123 @@ describe("Fireblocks governed ADA transfer", () => {
           maxFeeLovelace: 200_000,
           minimumApprovals: 1,
           minimumSigners: 2,
+          allowedSignerIds: ["designated-signer"],
         },
       })
     ).rejects.toMatchObject({ errorType: "GovernanceApprovalInsufficient" });
+    expect(harness.submitTransfer).not.toHaveBeenCalled();
+  });
+
+  it("refuses submission when Fireblocks reports an undesignated signer", async () => {
+    const harness = createHarness("APPROVED", "unexpected-signer");
+    await expect(
+      harness.sdk.transferAda({
+        recipientAddress: harness.recipientAddress,
+        lovelaceAmount: 2_000_000,
+        governance: {
+          externalTxId: "cardano-governance-test-006",
+          allowedRecipientAddresses: [harness.recipientAddress],
+          maxFeeLovelace: 200_000,
+          minimumApprovals: 1,
+          minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
+        },
+      })
+    ).rejects.toMatchObject({ errorType: "GovernanceApprovalInsufficient" });
+    expect(harness.submitTransfer).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Demeter submission hash that differs from the signed body", async () => {
+    const harness = createHarness();
+    harness.submitTransfer.mockResolvedValueOnce({
+      success: true,
+      data: { txHash: "c".repeat(64) },
+    });
+    await expect(
+      harness.sdk.transferAda({
+        recipientAddress: harness.recipientAddress,
+        lovelaceAmount: 2_000_000,
+        governance: {
+          externalTxId: "cardano-governance-test-007",
+          allowedRecipientAddresses: [harness.recipientAddress],
+          maxFeeLovelace: 200_000,
+          minimumApprovals: 1,
+          minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
+        },
+      })
+    ).rejects.toMatchObject({ errorType: "GovernanceCorrelationError" });
+  });
+
+  it("rejects mismatched Fireblocks response IDs before submission", async () => {
+    const harness = createHarness(
+      "APPROVED",
+      "designated-signer",
+      "different-fireblocks-transaction"
+    );
+    await expect(
+      harness.sdk.transferAda({
+        recipientAddress: harness.recipientAddress,
+        lovelaceAmount: 2_000_000,
+        governance: {
+          externalTxId: "cardano-governance-test-008",
+          allowedRecipientAddresses: [harness.recipientAddress],
+          maxFeeLovelace: 200_000,
+          minimumApprovals: 1,
+          minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
+        },
+      })
+    ).rejects.toMatchObject({ errorType: "GovernanceCorrelationError" });
+    expect(harness.submitTransfer).not.toHaveBeenCalled();
+  });
+
+  it("requires Fireblocks COMPLETED status before submission", async () => {
+    const harness = createHarness(
+      "APPROVED",
+      "designated-signer",
+      "fireblocks-tx-123",
+      "BROADCASTING"
+    );
+    await expect(
+      harness.sdk.transferAda({
+        recipientAddress: harness.recipientAddress,
+        lovelaceAmount: 2_000_000,
+        governance: {
+          externalTxId: "cardano-governance-test-009",
+          allowedRecipientAddresses: [harness.recipientAddress],
+          maxFeeLovelace: 200_000,
+          minimumApprovals: 1,
+          minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
+        },
+      })
+    ).rejects.toMatchObject({ errorType: "GovernanceAuthorizationIncomplete" });
+    expect(harness.submitTransfer).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Fireblocks signature that does not verify against the body", async () => {
+    const harness = createHarness(
+      "APPROVED",
+      "designated-signer",
+      "fireblocks-tx-123",
+      "COMPLETED",
+      true
+    );
+    await expect(
+      harness.sdk.transferAda({
+        recipientAddress: harness.recipientAddress,
+        lovelaceAmount: 2_000_000,
+        governance: {
+          externalTxId: "cardano-governance-test-010",
+          allowedRecipientAddresses: [harness.recipientAddress],
+          maxFeeLovelace: 200_000,
+          minimumApprovals: 1,
+          minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
+        },
+      })
+    ).rejects.toMatchObject({ errorType: "SignatureVerificationError" });
     expect(harness.submitTransfer).not.toHaveBeenCalled();
   });
 });
