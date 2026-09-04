@@ -90,6 +90,24 @@ and [TAP configuration reference](https://developers.fireblocks.com/reference/co
 
 ## Features
 
+The list below is the SDK's complete upstream feature set. Provider support is
+not all-or-nothing:
+
+| Feature group | IAGON | Demeter Blockfrost |
+| --- | --- | --- |
+| Health, address balance, UTxOs, latest slot, submission, transaction lookup | Supported | Supported |
+| ADA, single-token, multi-token transaction building and fee calculation | Supported | Uses the supported core provider path |
+| Fireblocks vault addresses, public keys, RAW signing, webhooks | Fireblocks-side | Fireblocks-side |
+| Balance by credential/stake key, full history, asset metadata | Supported | Not supported yet |
+| Staking, Cardano DRep governance, pool data | Supported | Not supported yet |
+| REST server and SDK connection pooling | Provider-independent | Provider-independent |
+
+Unsupported Demeter calls fail with a typed `ProviderCapabilityError`. They do
+not silently fall back to IAGON or return incomplete data. The companion POC has
+an executable, beginner-friendly
+[feature audit and live proof](https://github.com/verbotenj/cardano-raw-sdk-demeter-poc/blob/main/docs/DEMETER_README_COMPATIBILITY.md)
+against the original README revision used to create this fork.
+
 - 🔐 **Fireblocks Integration**: Secure vault account management and transaction signing
 - 🏦 **Balance Queries**: Check balances by address, credential, or stake key
 - 💸 **Token Transfers**: Execute Cardano token transfers with automatic UTXO selection
@@ -209,7 +227,7 @@ Transfer ADA without any tokens:
 const result = await sdk.transferAda({
   index: 0, // Source address index
   recipientAddress: "addr1qxy...",
-  adaAmount: 5000000, // 5 ADA in lovelace
+  lovelaceAmount: 5000000, // 5 ADA in lovelace
 });
 
 console.log("Transaction Hash:", result.txHash);
@@ -278,7 +296,7 @@ const result = await sdk.transferMultipleTokens({
     },
   ],
   includeAda: true, // Optional: include extra ADA in the transfer
-  adaAmount: 2000000, // 2 ADA in lovelace (required if includeAda is true)
+  lovelaceAmount: 2000000, // 2 ADA in lovelace (required if includeAda is true)
 });
 
 console.log("Transaction Hash:", result.txHash);
@@ -570,7 +588,7 @@ Content-Type: application/json
 {
   "vaultAccountId": "your-vault-id",
   "recipientAddress": "addr1qxy...",
-  "adaAmount": 5000000,
+  "lovelaceAmount": 5000000,
   "index": 0
 }
 
@@ -581,7 +599,7 @@ Content-Type: application/json
 {
   "vaultAccountId": "your-vault-id",
   "recipientAddress": "addr1qxy...",
-  "adaAmount": 5000000,
+  "lovelaceAmount": 5000000,
   "index": 0
 }
 ```
@@ -651,7 +669,7 @@ Content-Type: application/json
     }
   ],
   "includeAda": true,
-  "adaAmount": 2000000,
+  "lovelaceAmount": 2000000,
   "index": 0
 }
 
@@ -766,7 +784,7 @@ curl -X POST http://localhost:8000/api/transfers/ada \
   -d '{
     "vaultAccountId": "vault-123",
     "recipientAddress": "addr1qxy...",
-    "adaAmount": 5000000,
+    "lovelaceAmount": 5000000,
     "index": 0
   }'
 
@@ -776,7 +794,7 @@ curl -X POST http://localhost:8000/api/fee-estimate/ada \
   -d '{
     "vaultAccountId": "vault-123",
     "recipientAddress": "addr1qxy...",
-    "adaAmount": 5000000,
+    "lovelaceAmount": 5000000,
     "index": 0
   }'
 
@@ -814,7 +832,7 @@ curl -X POST http://localhost:8000/api/transfers/tokens \
       {"policyId": "a1b2c3d4e5f6...", "assetName": "544f4b454e", "amount": 500000}
     ],
     "includeAda": true,
-    "adaAmount": 2000000
+    "lovelaceAmount": 2000000
   }'
 
 # Consolidate UTxOs
@@ -1145,7 +1163,7 @@ async function transferAda() {
     const feeEstimate = await sdk.estimateAdaTransactionFee({
       index: 0,
       recipientAddress: "addr1qxy...",
-      adaAmount: 5000000, // 5 ADA
+      lovelaceAmount: 5000000, // 5 ADA
     });
     console.log("Estimated Fee:", feeEstimate.fee.ada, "ADA");
 
@@ -1153,7 +1171,7 @@ async function transferAda() {
     const result = await sdk.transferAda({
       index: 0,
       recipientAddress: "addr1qxy...",
-      adaAmount: 5000000,
+      lovelaceAmount: 5000000,
     });
 
     console.log("ADA Transfer successful!");
@@ -1205,7 +1223,7 @@ async function transferMultipleTokens() {
         },
       ],
       includeAda: true,
-      adaAmount: 2000000, // Also send 2 ADA
+      lovelaceAmount: 2000000, // Also send 2 ADA
     });
 
     console.log("Multi-token transfer successful!");
