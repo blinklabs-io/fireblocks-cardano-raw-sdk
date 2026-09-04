@@ -40,6 +40,9 @@ describe("DemeterBlockfrostProvider", () => {
       "DEMETER_BLOCKFROST_URL"
     );
     expect(() => new DemeterBlockfrostProvider({ baseUrl, apiKey: "" })).toThrow("DEMETER_API_KEY");
+    expect(() => provider({ maxRetries: -1 })).toThrow("maxRetries");
+    expect(() => provider({ maxRetries: 11 })).toThrow("maxRetries");
+    expect(() => provider({ pageSize: 0 })).toThrow("pageSize");
     expect(provider().capabilities).toEqual(new Set([ChainProviderCapability.CORE]));
   });
 
@@ -147,6 +150,36 @@ describe("DemeterBlockfrostProvider", () => {
     await expect(
       provider().getBalanceByAddress({ address: "addr_test1example", groupByPolicy: false })
     ).rejects.toThrow("Invalid Blockfrost asset unit");
+
+    handler = (_request, response) =>
+      json(response, 200, {
+        address: "addr_test1example",
+        amount: [{ unit: `${"g".repeat(56)}00`, quantity: "1" }],
+      });
+    await expect(
+      provider().getBalanceByAddress({ address: "addr_test1example", groupByPolicy: false })
+    ).rejects.toThrow("Invalid Blockfrost asset unit");
+  });
+
+  it("normalizes malformed provider payloads without echoing response data", async () => {
+    handler = (_request, response) =>
+      json(response, 200, {
+        address: "addr_test1example",
+        amount: "not-an-array",
+        credential: "must-not-appear-in-errors",
+      });
+
+    const operation = provider().getBalanceByAddress({
+      address: "addr_test1example",
+      groupByPolicy: false,
+    });
+    await expect(operation).rejects.toMatchObject({
+      name: "SdkApiError",
+      statusCode: 502,
+      errorType: "InvalidProviderResponse",
+      service: "DemeterBlockfrostProvider",
+    } satisfies Partial<SdkApiError>);
+    await expect(operation).rejects.not.toThrow("must-not-appear-in-errors");
   });
 
   it("retries rate limits and normalizes final transport errors", async () => {
@@ -180,7 +213,7 @@ describe("DemeterBlockfrostProvider", () => {
       request.on("data", (chunk: Buffer) => chunks.push(chunk));
       request.on("end", () => {
         receivedBody = Buffer.concat(chunks);
-        json(response, 200, "d".repeat(64));
+        json(response, 200, "D".repeat(64));
       });
     };
 
@@ -190,6 +223,13 @@ describe("DemeterBlockfrostProvider", () => {
     });
     expect(receivedBody).toEqual(Buffer.from("00a1", "hex"));
     await expect(provider().submitTransfer("not-cbor")).rejects.toThrow("hexadecimal CBOR");
+
+    handler = (_request, response) => json(response, 200, "not-a-transaction-hash");
+    await expect(provider().submitTransfer("00a1")).rejects.toMatchObject({
+      name: "SdkApiError",
+      statusCode: 502,
+      errorType: "InvalidProviderResponse",
+    });
   });
 
   it("maps transaction confirmation and returns null while absent", async () => {
