@@ -105,10 +105,6 @@ const createProvider = () =>
   });
 
 const runMock = async (): Promise<void> => {
-  if (!enabled("RUN_LIVE_DEMETER")) {
-    throw new Error("Set RUN_LIVE_DEMETER=1 to allow the live read-only Demeter proof");
-  }
-
   const provider = createProvider();
   const senderAddress = required("CARDANO_ADDRESS_1");
   const recipientAddress = required("CARDANO_ADDRESS_2");
