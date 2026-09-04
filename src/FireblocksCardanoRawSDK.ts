@@ -1016,6 +1016,16 @@ export class FireblocksCardanoRawSDK {
     const approvedUsers = new Set<string>();
     const groups: GovernanceAuthorizationGroupEvidence[] = authorization.groups.map((group) => {
       const statuses = Object.entries(group.users ?? {});
+      const documentedStatuses = new Set(["APPROVED", "PENDING_AUTHORIZATION", "REJECTED", "NA"]);
+      if (statuses.some(([, status]) => !documentedStatuses.has(status))) {
+        throw new SdkApiError(
+          "Fireblocks returned an unknown authorization status",
+          502,
+          "GovernanceEvidenceInvalid",
+          { fireblocksTransactionId: transaction.id },
+          "FireblocksCardanoRawSDK"
+        );
+      }
       for (const [userId, status] of statuses) {
         if (status === "APPROVED") approvedUsers.add(userId);
       }
@@ -1034,7 +1044,16 @@ export class FireblocksCardanoRawSDK {
       };
     });
 
-    const logic = authorization.logic ?? "AND";
+    if (authorization.logic !== "AND" && authorization.logic !== "OR") {
+      throw new SdkApiError(
+        "Fireblocks returned missing or unknown authorization-group logic",
+        502,
+        "GovernanceEvidenceInvalid",
+        { fireblocksTransactionId: transaction.id },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    const logic = authorization.logic;
     const groupsSatisfied =
       logic === "OR"
         ? groups.some((group) => group.satisfied)
