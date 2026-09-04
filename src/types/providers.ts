@@ -29,6 +29,8 @@ export interface CardanoDataProvider {
   getBalanceByAddress(
     params: getBalanceByAddressOpts
   ): Promise<BalanceResponse | GroupedBalanceResponse>;
+  /** Optional authoritative network identity, when exposed by the provider. */
+  getNetworkMagic?(): Promise<number>;
   getCurrentSlot(): Promise<number>;
   submitTransfer(tx: string, skipValidation?: boolean): Promise<TransferResponse>;
   getTransactionDetails(hash: string): Promise<TransactionDetailsResponse | null>;
