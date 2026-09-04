@@ -54,6 +54,11 @@ const blockSchema = z.object({
   slot: z.number().int().nonnegative(),
 });
 
+const transactionHashSchema = z
+  .string()
+  .regex(/^[0-9a-fA-F]{64}$/)
+  .transform((hash) => hash.toLowerCase());
+
 export interface DemeterBlockfrostProviderOptions {
   baseUrl: string;
   apiKey: string;
@@ -83,6 +88,9 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
 
     this.maxRetries = options.maxRetries ?? 2;
     this.pageSize = options.pageSize ?? 100;
+    if (!Number.isInteger(this.maxRetries) || this.maxRetries < 0 || this.maxRetries > 10) {
+      throw new Error("Demeter Blockfrost maxRetries must be an integer between 0 and 10");
+    }
     if (!Number.isInteger(this.pageSize) || this.pageSize < 1 || this.pageSize > 100) {
       throw new Error("Demeter Blockfrost pageSize must be an integer between 1 and 100");
     }
@@ -92,14 +100,14 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
       axios.create({
         baseURL: baseUrl,
         timeout: 30_000,
-        headers: { "dmtr-api-key": options.apiKey },
+        headers: { "dmtr-api-key": options.apiKey.trim() },
       });
   }
 
   public async checkHealth(): Promise<HealthStatusResponse> {
     try {
       const response = await this.request(() => this.client.get("/health"), "health check");
-      const health = healthSchema.parse(response.data);
+      const health = this.parseResponse(healthSchema, response.data, "health check");
       return {
         success: health.is_healthy,
         data: {
@@ -123,7 +131,7 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
       () => this.client.get(`/addresses/${encodeURIComponent(params.address)}`),
       `balance for address ${params.address}`
     );
-    const data = addressSchema.parse(response.data);
+    const data = this.parseResponse(addressSchema, response.data, "address balance");
     return this.toBalanceResponse(data.amount, params.groupByPolicy);
   }
 
@@ -146,7 +154,7 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
         throw error;
       }
 
-      const pageData = z.array(utxoSchema).parse(response.data);
+      const pageData = this.parseResponse(z.array(utxoSchema), response.data, "address UTxOs");
       utxos.push(...pageData.map((utxo) => this.toUtxo(utxo)));
       if (pageData.length < this.pageSize) break;
     }
@@ -155,7 +163,7 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
 
   public async getCurrentSlot(): Promise<number> {
     const response = await this.request(() => this.client.get("/blocks/latest"), "latest block");
-    return blockSchema.parse(response.data).slot;
+    return this.parseResponse(blockSchema, response.data, "latest block").slot;
   }
 
   public async submitTransfer(tx: string): Promise<TransferResponse> {
@@ -169,7 +177,11 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
         }),
       "transaction submission"
     );
-    const txHash = z.string().min(1).parse(response.data);
+    const txHash = this.parseResponse(
+      transactionHashSchema,
+      response.data,
+      "transaction submission"
+    );
     return { success: true, data: { txHash } };
   }
 
@@ -179,7 +191,7 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
         () => this.client.get(`/txs/${encodeURIComponent(hash)}`),
         `transaction ${hash}`
       );
-      const tx = txSchema.parse(response.data);
+      const tx = this.parseResponse(txSchema, response.data, "transaction details");
       const data: DetailedTransaction = {
         tx_hash: tx.hash,
         block_hash: tx.block,
@@ -242,7 +254,7 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
     assetName: string;
     internalUnit: string;
   } {
-    if (unit.length < 56) {
+    if (unit.length < 56 || !/^[0-9a-fA-F]+$/.test(unit)) {
       throw new Error(`Invalid Blockfrost asset unit '${unit}'`);
     }
     const policyId = unit.slice(0, 56);
@@ -256,6 +268,22 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
       throw new Error(`Unsafe numeric quantity for ${context}: ${value}`);
     }
     return quantity;
+  }
+
+  private parseResponse<T>(schema: z.ZodType<T>, value: unknown, context: string): T {
+    const result = schema.safeParse(value);
+    if (result.success) return result.data;
+
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join(".") || "response"}: ${issue.message}`)
+      .join("; ");
+    throw new SdkApiError(
+      `Invalid Demeter Blockfrost ${context} response: ${issues}`,
+      502,
+      "InvalidProviderResponse",
+      undefined,
+      "DemeterBlockfrostProvider"
+    );
   }
 
   private async request<T>(operation: () => Promise<AxiosResponse<T>>, context: string) {
