@@ -6,11 +6,24 @@ import {
   SignedMessageAlgorithmEnum,
   VaultWalletAddress,
   TransactionOperation,
+  TransactionResponse,
   TransferPeerPathType,
 } from "@fireblocks/ts-sdk";
 
 import { getTxStatus, Logger } from "../utils/index.js";
 import { SdkApiError } from "../types/index.js";
+
+export interface FireblocksSigningResponse {
+  id: string;
+  data: Array<{
+    signature: SignedMessageSignature;
+    content?: string;
+    publicKey?: string;
+    algorithm?: SignedMessageAlgorithmEnum;
+  }>;
+  /** Terminal Fireblocks response used to produce sanitized governance evidence. */
+  transaction: TransactionResponse;
+}
 
 /**
  * Service class for interacting with the Fireblocks SDK.
@@ -359,15 +372,7 @@ export class FireblocksService {
    */
   public signTransaction = async (
     transactionPayload: TransactionRequest
-  ): Promise<{
-    id: string;
-    data: Array<{
-      signature: SignedMessageSignature;
-      content?: string;
-      publicKey?: string;
-      algorithm?: SignedMessageAlgorithmEnum;
-    }>;
-  } | null> => {
+  ): Promise<FireblocksSigningResponse | null> => {
     try {
       const transactionResponse = await this.fireblocksSDK.transactions.createTransaction({
         transactionRequest: transactionPayload,
@@ -388,6 +393,7 @@ export class FireblocksService {
         return {
           id: txId,
           data: txData,
+          transaction: completedTx,
         };
       } else {
         this.logger.warn("No signed messages found in response.");
