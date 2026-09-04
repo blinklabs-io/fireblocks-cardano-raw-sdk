@@ -9,7 +9,7 @@ queries, UTxO selection, raw ADA transaction submission, and confirmation.
 The included development runner does not depend on Phantom. Local environment files
 remain ignored by Git.
 
-1. Add `DEMETER_API_KEY` to `.env.development` and set `RUN_LIVE_DEMETER=1`.
+1. Add `DEMETER_API_KEY` to `.env.development`.
 2. Run `npm run poc:mock` to query Preview, build a 2 ADA transaction, and verify a
    local witness. This mode never submits the transaction.
 3. Add the Fireblocks API key, secret, and `FIREBLOCKS_VAULT_ACCOUNT_ID`, then set
