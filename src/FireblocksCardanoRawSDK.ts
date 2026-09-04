@@ -3,6 +3,7 @@ import {
   VaultWalletAddress,
   TransactionRequest,
   TransactionOperation,
+  TransactionStateEnum,
   TransferPeerPathType,
 } from "@fireblocks/ts-sdk";
 
@@ -140,7 +141,7 @@ export interface SDKConfig {
 
 type RawSigningGovernanceEvidence = Omit<
   FireblocksGovernanceEvidence,
-  "preflight" | "chainProvider" | "submittedTransactionHash" | "onChainHashMatchesBody"
+  "preflight" | "chainProvider" | "submittedTransactionHash" | "demeterSubmissionHashMatchesBody"
 >;
 
 interface PreparedAdaTransaction {
@@ -1007,11 +1008,16 @@ export class FireblocksCardanoRawSDK {
       logic === "OR"
         ? groups.some((group) => group.satisfied)
         : groups.every((group) => group.satisfied);
-    const signerCount = new Set(transaction.signedBy ?? []).size;
+    const signers = new Set(transaction.signedBy ?? []);
+    const signerCount = signers.size;
+    const allowedSigners = new Set(requirements.allowedSignerIds);
+    const allSignersDesignated =
+      signerCount > 0 && [...signers].every((signerId) => allowedSigners.has(signerId));
     const requirementsSatisfied =
       groupsSatisfied &&
       approvedUsers.size >= requirements.minimumApprovals &&
-      signerCount >= requirements.minimumSigners;
+      signerCount >= requirements.minimumSigners &&
+      allSignersDesignated;
 
     if (!requirementsSatisfied) {
       throw new SdkApiError(
@@ -1025,6 +1031,8 @@ export class FireblocksCardanoRawSDK {
           requiredApprovals: requirements.minimumApprovals,
           signerCount,
           requiredSigners: requirements.minimumSigners,
+          configuredDesignatedSignerCount: allowedSigners.size,
+          allSignersDesignated,
         },
         "FireblocksCardanoRawSDK"
       );
@@ -1039,6 +1047,8 @@ export class FireblocksCardanoRawSDK {
       approvedAuthorizers: approvedUsers.size,
       signerCount,
       designatedSignerEvidencePresent: true,
+      configuredDesignatedSignerCount: allowedSigners.size,
+      allSignersDesignated: true,
       minimumApprovals: requirements.minimumApprovals,
       minimumSigners: requirements.minimumSigners,
       requirementsSatisfied: true,
@@ -1074,6 +1084,33 @@ export class FireblocksCardanoRawSDK {
     const txData = await this.fireblocksService.signTransaction(transactionPayload);
     if (!txData) {
       throw new Error("SigningFailed: Fireblocks returned no signing response");
+    }
+    if (txData.id !== txData.transaction.id) {
+      throw new SdkApiError(
+        "Fireblocks signing response IDs do not match",
+        502,
+        "GovernanceCorrelationError",
+        { signingResponseId: txData.id, transactionResponseId: txData.transaction.id },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (governance && txData.transaction.status !== TransactionStateEnum.Completed) {
+      throw new SdkApiError(
+        "Fireblocks governed RAW signing did not reach COMPLETED status",
+        502,
+        "GovernanceAuthorizationIncomplete",
+        { fireblocksTransactionId: txData.id, status: txData.transaction.status },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (governance && txData.data.length !== 1) {
+      throw new SdkApiError(
+        "Fireblocks must return exactly one signed message for a governed Cardano transaction",
+        502,
+        "GovernanceCorrelationError",
+        { fireblocksTransactionId: txData.id, signedMessageCount: txData.data.length },
+        "FireblocksCardanoRawSDK"
+      );
     }
     const signatureResponse = txData.data[0];
 
@@ -1217,7 +1254,9 @@ export class FireblocksCardanoRawSDK {
   //    Fee estimation uses the same prepare path so estimates match actuals.
   //
   // 2. ADA (native):
-  //    fireblocksService.createTransfer() - delegates to Fireblocks native transfer.
+  //    Demeter builds locally, signs the exact body hash through Fireblocks RAW,
+  //    then submits through the provider. IAGON retains the native Fireblocks
+  //    transfer path for backward compatibility.
   //    Fee estimation builds locally (prepareAdaTransaction) for preview only;
   //    actual transfer uses Fireblocks co-signing infrastructure.
   //
@@ -1487,7 +1526,7 @@ export class FireblocksCardanoRawSDK {
     } = params;
 
     // Validate amount
-    if (!Number.isInteger(lovelaceAmount) || lovelaceAmount <= 0) {
+    if (!Number.isSafeInteger(lovelaceAmount) || lovelaceAmount <= 0) {
       throw new SdkApiError(
         "lovelaceAmount must be a positive integer",
         400,
@@ -1651,6 +1690,20 @@ export class FireblocksCardanoRawSDK {
         "FireblocksCardanoRawSDK"
       );
     }
+    if (
+      !Array.isArray(requirements.allowedSignerIds) ||
+      !requirements.allowedSignerIds.length ||
+      requirements.allowedSignerIds.some((signerId) => !signerId?.trim()) ||
+      new Set(requirements.allowedSignerIds).size !== requirements.allowedSignerIds.length
+    ) {
+      throw new SdkApiError(
+        "governance.allowedSignerIds must contain unique, non-empty Fireblocks user IDs",
+        400,
+        "GovernanceValidationError",
+        undefined,
+        "FireblocksCardanoRawSDK"
+      );
+    }
     if (!requirements.allowedRecipientAddresses.includes(prepared.resolvedRecipientAddress)) {
       throw new SdkApiError(
         "Resolved recipient is not present in the governance allowlist",
@@ -1754,6 +1807,25 @@ export class FireblocksCardanoRawSDK {
     const recipientLovelace = Number(recipientValue.coin().to_str());
     const changeLovelace = Number(changeValue.coin().to_str());
     const expectedChange = prepared.accumulatedAda - options.lovelaceAmount - prepared.fee;
+
+    for (const [field, value] of [
+      ["amountLovelace", options.lovelaceAmount],
+      ["feeLovelace", prepared.fee],
+      ["inputLovelace", prepared.accumulatedAda],
+      ["recipientLovelace", recipientLovelace],
+      ["changeLovelace", changeLovelace],
+      ["expectedChangeLovelace", expectedChange],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new SdkApiError(
+          `Governance validation encountered unsafe ${field}`,
+          500,
+          "GovernanceValidationError",
+          { field },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+    }
 
     if (
       recipientOutputAddress.to_bech32() !== prepared.resolvedRecipientAddress ||
@@ -1941,10 +2013,10 @@ export class FireblocksCardanoRawSDK {
         const signedTransaction = signingResult.signedTransaction;
         try {
           const txHash = await submitTransaction(this.chainProvider, signedTransaction);
-          const onChainHashMatchesBody = signingResult.governance
+          const demeterSubmissionHashMatchesBody = signingResult.governance
             ? txHash.toLowerCase() === signingResult.governance.transactionBodyHash.toLowerCase()
             : undefined;
-          if (signingResult.governance && !onChainHashMatchesBody) {
+          if (signingResult.governance && !demeterSubmissionHashMatchesBody) {
             throw new SdkApiError(
               "Demeter returned a transaction hash that does not match the Fireblocks-signed Cardano body",
               502,
@@ -1973,7 +2045,7 @@ export class FireblocksCardanoRawSDK {
                   preflight,
                   chainProvider: "demeter",
                   submittedTransactionHash: txHash,
-                  onChainHashMatchesBody: true,
+                  demeterSubmissionHashMatchesBody: true,
                 },
               }),
           };
