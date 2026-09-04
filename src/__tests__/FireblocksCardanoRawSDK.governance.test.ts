@@ -58,6 +58,7 @@ describe("Fireblocks governed ADA transfer", () => {
       const hash = Buffer.from(blake2b(body.to_bytes(), undefined, 32)).toString("hex");
       return { success: true as const, data: { txHash: hash } };
     });
+    const getNetworkMagic = jest.fn(async () => 2);
     const provider: CardanoDataProvider = {
       kind: "demeter",
       capabilities: new Set([ChainProviderCapability.CORE]),
@@ -70,6 +71,7 @@ describe("Fireblocks governed ADA transfer", () => {
         data: { lovelace: 10_000_000, assets: {} },
       })),
       getUtxosByAddress: jest.fn(async () => ({ success: true, data: [selectedUtxo] })),
+      getNetworkMagic,
       getCurrentSlot: jest.fn(async () => 12_000_000),
       submitTransfer,
       getTransactionDetails: jest.fn(async () => null),
@@ -123,7 +125,14 @@ describe("Fireblocks governed ADA transfer", () => {
       logger: new Logger("governance-test"),
     });
 
-    return { sdk, senderAddress, recipientAddress, signTransaction, submitTransfer };
+    return {
+      sdk,
+      senderAddress,
+      recipientAddress,
+      getNetworkMagic,
+      signTransaction,
+      submitTransfer,
+    };
   };
 
   it("correlates preflight, Fireblocks policy evidence, signature, and Cardano hash", async () => {
@@ -161,6 +170,8 @@ describe("Fireblocks governed ADA transfer", () => {
       },
       preflight: {
         network: Networks.PREVIEW,
+        providerNetworkMagic: 2,
+        expectedNetworkMagic: 2,
         recipientAllowed: true,
         amountLovelace: 2_000_000,
         inputCount: 1,
@@ -175,6 +186,27 @@ describe("Fireblocks governed ADA transfer", () => {
       })
     );
     expect(harness.submitTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks a Demeter resource for the wrong Cardano network before signing", async () => {
+    const harness = createHarness();
+    harness.getNetworkMagic.mockResolvedValueOnce(1);
+    await expect(
+      harness.sdk.transferAda({
+        recipientAddress: harness.recipientAddress,
+        lovelaceAmount: 2_000_000,
+        governance: {
+          externalTxId: "cardano-governance-test-network",
+          allowedRecipientAddresses: [harness.recipientAddress],
+          maxFeeLovelace: 200_000,
+          minimumApprovals: 1,
+          minimumSigners: 1,
+          allowedSignerIds: ["designated-signer"],
+        },
+      })
+    ).rejects.toMatchObject({ errorType: "GovernanceNetworkMismatch" });
+    expect(harness.signTransaction).not.toHaveBeenCalled();
+    expect(harness.submitTransfer).not.toHaveBeenCalled();
   });
 
   it("blocks a recipient outside the local governance allowlist before signing", async () => {

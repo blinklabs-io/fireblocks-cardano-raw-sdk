@@ -49,6 +49,8 @@ export interface FireblocksGovernanceEvidence {
   };
   preflight: {
     network: string;
+    providerNetworkMagic: number;
+    expectedNetworkMagic: number;
     recipientAllowed: true;
     amountLovelace: number;
     feeLovelace: number;

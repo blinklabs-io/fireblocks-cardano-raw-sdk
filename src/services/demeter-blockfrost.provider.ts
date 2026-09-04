@@ -54,6 +54,10 @@ const blockSchema = z.object({
   slot: z.number().int().nonnegative(),
 });
 
+const genesisSchema = z.object({
+  network_magic: z.number().int().nonnegative(),
+});
+
 const transactionHashSchema = z
   .string()
   .regex(/^[0-9a-fA-F]{64}$/)
@@ -164,6 +168,12 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
   public async getCurrentSlot(): Promise<number> {
     const response = await this.request(() => this.client.get("/blocks/latest"), "latest block");
     return this.parseResponse(blockSchema, response.data, "latest block").slot;
+  }
+
+  /** Read the Cardano network identifier from the provider's genesis data. */
+  public async getNetworkMagic(): Promise<number> {
+    const response = await this.request(() => this.client.get("/genesis"), "genesis");
+    return this.parseResponse(genesisSchema, response.data, "genesis").network_magic;
   }
 
   public async submitTransfer(tx: string): Promise<TransferResponse> {

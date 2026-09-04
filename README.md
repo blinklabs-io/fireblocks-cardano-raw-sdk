@@ -1,8 +1,8 @@
 # Cardano Raw SDK — Demeter-enabled fork
 
 This fork of Fireblocks' Cardano Raw SDK preserves the existing IAGON integration
-and adds a selectable Demeter-hosted Blockfrost provider for Preview balance
-queries, UTxO selection, raw ADA transaction submission, and confirmation.
+and adds a selectable Demeter-hosted Blockfrost provider for network identity,
+balance queries, UTxO selection, raw ADA transaction submission, and confirmation.
 
 ## Demeter development runner
 
@@ -55,6 +55,10 @@ provider nor the application ever receives the Fireblocks private key. The resul
 contains sanitized evidence that correlates the local intent, Fireblocks request,
 approval quorum, signature, Demeter submission, and final Cardano transaction.
 
+For governed transfers, network validation includes the provider's authoritative
+`/genesis` network magic. This prevents a Preview configuration from accidentally
+signing against Preprod merely because both networks use `addr_test1` addresses.
+
 ```ts
 const result = await sdk.transferAda({
   recipientAddress: approvedPreviewAddress,
@@ -96,6 +100,7 @@ not all-or-nothing:
 | Feature group | IAGON | Demeter Blockfrost |
 | --- | --- | --- |
 | Health, address balance, UTxOs, latest slot, submission, transaction lookup | Supported | Supported |
+| Authoritative network identity | Not required by the legacy path | `/genesis` network magic required for governed signing |
 | ADA, single-token, multi-token transaction building and fee calculation | Supported | Uses the supported core provider path |
 | Fireblocks vault addresses, public keys, RAW signing, webhooks | Fireblocks-side | Fireblocks-side |
 | Balance by credential/stake key, full history, asset metadata | Supported | Not supported yet |

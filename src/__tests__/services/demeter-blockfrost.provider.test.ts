@@ -46,18 +46,20 @@ describe("DemeterBlockfrostProvider", () => {
     expect(provider().capabilities).toEqual(new Set([ChainProviderCapability.CORE]));
   });
 
-  it("authenticates health and latest-slot requests with dmtr-api-key", async () => {
+  it("authenticates health, network, and latest-slot requests with dmtr-api-key", async () => {
     const requests: string[] = [];
     handler = (request, response) => {
       expect(request.headers["dmtr-api-key"]).toBe("demeter-test-key");
       requests.push(request.url || "");
       if (request.url === "/health") return json(response, 200, { is_healthy: true });
+      if (request.url === "/genesis") return json(response, 200, { network_magic: 2 });
       return json(response, 200, { slot: 123456 });
     };
 
     await expect(provider().checkHealth()).resolves.toMatchObject({ success: true });
+    await expect(provider().getNetworkMagic()).resolves.toBe(2);
     await expect(provider().getCurrentSlot()).resolves.toBe(123456);
-    expect(requests).toEqual(["/health", "/blocks/latest"]);
+    expect(requests).toEqual(["/health", "/genesis", "/blocks/latest"]);
   });
 
   it("normalizes flat and policy-grouped balances", async () => {

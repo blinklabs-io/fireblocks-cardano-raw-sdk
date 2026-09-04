@@ -209,6 +209,37 @@ export class FireblocksCardanoRawSDK {
     return this.stakingService;
   }
 
+  /** Prove the selected Demeter resource belongs to the configured Cardano network. */
+  private async validateGovernedProviderNetwork(): Promise<{
+    providerNetworkMagic: number;
+    expectedNetworkMagic: number;
+  }> {
+    if (!this.chainProvider.getNetworkMagic) {
+      throw new SdkApiError(
+        "The selected provider cannot prove its Cardano network identity",
+        502,
+        "GovernanceNetworkEvidenceMissing",
+        { provider: this.chainProvider.kind },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    const expectedNetworkMagic =
+      this.network === Networks.MAINNET ? 764824073 : this.network === Networks.PREPROD ? 1 : 2;
+    const providerNetworkMagic = await this.chainProvider.getNetworkMagic();
+    if (providerNetworkMagic !== expectedNetworkMagic) {
+      throw new SdkApiError(
+        `Provider network magic ${providerNetworkMagic} does not match configured ${this.network} network magic ${expectedNetworkMagic}`,
+        400,
+        "GovernanceNetworkMismatch",
+        { providerNetworkMagic, expectedNetworkMagic, network: this.network },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    return { providerNetworkMagic, expectedNetworkMagic };
+  }
+
   public static createInstance = async (params: {
     fireblocksConfig: ConfigurationOptions;
     vaultAccountId: string;
@@ -1667,7 +1698,8 @@ export class FireblocksCardanoRawSDK {
   private validateGovernedAdaPreflight(
     options: AdaTransferOpts,
     prepared: PreparedAdaTransaction,
-    requirements: FireblocksGovernanceRequirements
+    requirements: FireblocksGovernanceRequirements,
+    networkEvidence: { providerNetworkMagic: number; expectedNetworkMagic: number }
   ): FireblocksGovernanceEvidence["preflight"] {
     if (!requirements.externalTxId?.trim()) {
       throw new SdkApiError(
@@ -1891,6 +1923,7 @@ export class FireblocksCardanoRawSDK {
 
     return {
       network: this.network,
+      ...networkEvidence,
       recipientAllowed: true,
       amountLovelace: options.lovelaceAmount,
       feeLovelace: prepared.fee,
@@ -2000,9 +2033,17 @@ export class FireblocksCardanoRawSDK {
       }
 
       if (this.chainProvider.kind === "demeter") {
+        const networkEvidence = options.governance
+          ? await this.validateGovernedProviderNetwork()
+          : undefined;
         const prepared = await this.prepareAdaTransaction(options);
         const preflight = options.governance
-          ? this.validateGovernedAdaPreflight(options, prepared, options.governance)
+          ? this.validateGovernedAdaPreflight(
+              options,
+              prepared,
+              options.governance,
+              networkEvidence!
+            )
           : undefined;
         const signingResult = await this.signTransactionWithEvidence(
           prepared.txBody,
