@@ -4,6 +4,7 @@ export * from "./config.js";
 export * from "./enums.js";
 export * from "./errors.js";
 export * from "./fireblocks.js";
+export * from "./governance.js";
 export * from "./operations.js";
 export * from "./providers.js";
 export * from "./transactions.js";

@@ -2,6 +2,7 @@ import { TransactionRequest, VaultWalletAddress, SignedMessageSignature } from "
 import { CardanoDataProvider } from "./providers.js";
 import { TransactionType, TransactionHistoryResponse } from "./index.js";
 import { TokenTransferSpec } from "./iagon/general.js";
+import { FireblocksGovernanceEvidence } from "./governance.js";
 
 /**
  * Options for getting a single vault account address by index
@@ -363,6 +364,8 @@ export interface AdaTransferResult {
    * Present only when token UTxOs were consumed to fund the transfer.
    */
   tokensPresentedInChange?: string[];
+  /** Present when strict Fireblocks RAW-signing governance was requested. */
+  governance?: FireblocksGovernanceEvidence;
 }
 
 /**

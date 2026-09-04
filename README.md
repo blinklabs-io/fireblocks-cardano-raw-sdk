@@ -38,6 +38,55 @@ Demeter currently implements the core transfer capability. IAGON-only account,
 history, staking, governance, pool, and asset-metadata calls fail with a typed
 `ProviderCapabilityError` when Demeter is selected.
 
+## Governed Fireblocks-to-Cardano transfers
+
+The Demeter transfer path can require a strict governance contract. The SDK first
+builds the complete Cardano transaction locally and validates its network,
+recipient allowlist, amount, fee ceiling, inputs, outputs, change, and native-asset
+preservation. Only that immutable transaction-body hash is sent to Fireblocks.
+After Fireblocks approval and RAW signing, the SDK verifies the signature and
+signing key, reassembles the witness without changing the body, and accepts a
+Demeter submission hash only when it matches the signed Cardano body hash.
+
+This separation is valuable for treasury and regulated wallet teams: Fireblocks
+governs **who may authorize and sign**, Demeter provides **Cardano access and
+submission**, and Cardano provides **public settlement**. Neither the chain
+provider nor the application ever receives the Fireblocks private key. The result
+contains sanitized evidence that correlates the local intent, Fireblocks request,
+approval quorum, signature, Demeter submission, and final Cardano transaction.
+
+```ts
+const result = await sdk.transferAda({
+  recipientAddress: approvedPreviewAddress,
+  lovelaceAmount: 2_000_000,
+  governance: {
+    // Generate a fresh value for every business operation. Fireblocks also uses
+    // externalTxId for request de-duplication.
+    externalTxId: crypto.randomUUID(),
+    allowedRecipientAddresses: [approvedPreviewAddress],
+    maxFeeLovelace: 300_000,
+    minimumApprovals: 1,
+    minimumSigners: 1,
+  },
+});
+
+console.log({
+  cardanoTransactionHash: result.txHash,
+  fireblocksTransactionId: result.governance?.fireblocksTransactionId,
+  bodyHash: result.governance?.transactionBodyHash,
+  approvalRequirementsMet: result.governance?.matchedPolicy.requirementsSatisfied,
+});
+```
+
+The Fireblocks workspace must enable RAW signing and contain an applicable
+Transaction Authorization Policy (TAP) rule with authorization groups and
+designated signers. RAW policy rules do not express a Cardano destination, so the
+SDK recipient allowlist and transaction preflight are deliberate additional
+controls. `matchedPolicy` is a sanitized summary of Fireblocks'
+`authorizationInfo`; it is not a Fireblocks policy-rule identifier. See the
+[Fireblocks RAW signing guide](https://developers.fireblocks.com/docs/raw-signing)
+and [TAP configuration reference](https://developers.fireblocks.com/reference/configure-transaction-authorization-policy).
+
 ## Features
 
 - 🔐 **Fireblocks Integration**: Secure vault account management and transaction signing
@@ -83,7 +132,8 @@ history, staking, governance, pool, and asset-metadata calls fail with a typed
 - Node.js 18+ (for SDK usage)
 - Docker & Docker Compose (for API service deployment)
 - Fireblocks API credentials
-- Iagon API key (required for balance queries, transaction history, and transfers)
+- IAGON API key for the full IAGON feature set, or a Demeter API key for the core
+  Cardano transfer path
 
 ### Install as a TypeScript Package
 

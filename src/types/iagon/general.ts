@@ -1,4 +1,5 @@
 import { GroupByOptions } from "../index.js";
+import { FireblocksGovernanceRequirements } from "../governance.js";
 
 export interface getBalanceByAddressOpts {
   address: string;
@@ -108,6 +109,8 @@ export interface AdaTransferOpts {
   recipientIndex?: number;
   /** Amount to send in lovelace (1 ADA = 1,000,000 lovelace) */
   lovelaceAmount: number;
+  /** Enable strict Fireblocks RAW-signing governance evidence for locally built ADA. */
+  governance?: FireblocksGovernanceRequirements;
 }
 
 export interface HealthStatusResponse {
