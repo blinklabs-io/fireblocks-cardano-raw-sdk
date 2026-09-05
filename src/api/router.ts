@@ -1285,6 +1285,7 @@ export const configureRouter = (sdkManager: SdkManager): Router => {
    * @swagger
    * /api/transfers:
    *   post:
+   *     security: []
    *     summary: Execute a transfer
    *     description: |
    *       Executes a transfer of tokens between accounts.

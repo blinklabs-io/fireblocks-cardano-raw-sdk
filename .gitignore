@@ -15,11 +15,9 @@ yarn-debug.log*
 yarn-error.log*
 
 build/
-dist/
 coverage/
 
 yarn.lock
-package-lock.json
 
 .env
 .env.test
@@ -39,4 +37,5 @@ package-lock.json
 CLAUDE.md
 *.md
 !README.md
+!SECURITY.md
 *.pdf

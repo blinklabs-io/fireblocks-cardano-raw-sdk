@@ -1794,7 +1794,7 @@ export class FireblocksCardanoRawSDK {
     try {
       sender = Address.from_bech32(prepared.senderAddress);
       recipient = Address.from_bech32(prepared.resolvedRecipientAddress);
-    } catch (error) {
+    } catch {
       throw new SdkApiError(
         "Sender or recipient is not a valid Cardano bech32 address",
         400,

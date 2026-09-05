@@ -1,0 +1,2534 @@
+import { TransactionOperation, TransactionStateEnum, TransferPeerPathType, } from "@fireblocks/ts-sdk";
+import { Logger, buildAdaTransactionWithCalculatedFee, fetchAndSelectUtxosForAda, fetchAndSelectUtxosForMultiToken, buildCntTransactionWithCalculatedFee, buildMultiTokenTransactionWithCalculatedFee, buildConsolidationTransactionWithCalculatedFee, countDistinctPolicies, getExtraPolicies, WITNESS_COUNT_PAYMENT_KEY_ONLY, calculateTransactionFee, calculateTtl, createTransactionInputs, fetchUtxos, fetchAndSelectUtxosForCnt, submitTransaction, decodeAssetName, formatWithDecimals, parseAdaStringToLovelace, getStakeAddressFromBaseAddress, utxoLocks, } from "./utils/index.js";
+import { SupportedAssets, Networks, GroupByOptions, SdkApiError, WebhookEventTypes, ChainProviderCapability, ProviderCapabilityError, } from "./types/index.js";
+import { DemeterBlockfrostProvider, FireblocksService, IagonApiService, StakingService, } from "./services/index.js";
+import { CardanoAmounts, CardanoConstants, FireblocksWebhookConstants } from "./constants.js";
+import { Address, BaseAddress, Ed25519Signature, EnterpriseAddress, PointerAddress, PublicKey, Transaction, TransactionWitnessSet, Vkey, Vkeywitness, Vkeywitnesses, } from "@emurgo/cardano-serialization-lib-nodejs";
+import { blake2b } from "blakejs";
+import crypto from "crypto";
+import { createRemoteJWKSet, compactVerify } from "jose";
+export class FireblocksCardanoRawSDK {
+    fireblocksService;
+    chainProvider;
+    iagonApiService;
+    stakingService;
+    network;
+    vaultAccountId;
+    addresses = new Map();
+    publicKeys = new Map();
+    logger;
+    jwksCache = new Map();
+    /**
+     * Creates a new FireblocksCardanoRawSDK instance
+     *
+     * @param config - SDK configuration
+     */
+    constructor(config) {
+        this.logger = config.logger;
+        this.fireblocksService = config.fireblocksService;
+        this.chainProvider = config.chainProvider;
+        this.iagonApiService = config.iagonApiService;
+        this.stakingService = config.stakingService;
+        this.network = config.network;
+        this.vaultAccountId = config.vaultAccountId;
+        this.logger.info("FireblocksCardanoRawSDK initialized successfully");
+    }
+    /**
+     * Gets the Fireblocks asset ID for the current network
+     * @returns SupportedAssets.ADA for mainnet, SupportedAssets.ADA_TEST for testnets
+     */
+    get assetId() {
+        return this.network === Networks.MAINNET ? SupportedAssets.ADA : SupportedAssets.ADA_TEST;
+    }
+    requireIagonProvider(capability) {
+        if (!this.iagonApiService) {
+            throw new ProviderCapabilityError(this.chainProvider.kind, capability);
+        }
+        return this.iagonApiService;
+    }
+    requireStakingService(capability = ChainProviderCapability.STAKING) {
+        if (!this.stakingService) {
+            throw new ProviderCapabilityError(this.chainProvider.kind, capability);
+        }
+        return this.stakingService;
+    }
+    /** Prove the selected Demeter resource belongs to the configured Cardano network. */
+    async validateGovernedProviderNetwork() {
+        if (!this.chainProvider.getNetworkMagic) {
+            throw new SdkApiError("The selected provider cannot prove its Cardano network identity", 502, "GovernanceNetworkEvidenceMissing", { provider: this.chainProvider.kind }, "FireblocksCardanoRawSDK");
+        }
+        const expectedNetworkMagic = this.network === Networks.MAINNET ? 764824073 : this.network === Networks.PREPROD ? 1 : 2;
+        const providerNetworkMagic = await this.chainProvider.getNetworkMagic();
+        if (providerNetworkMagic !== expectedNetworkMagic) {
+            throw new SdkApiError(`Provider network magic ${providerNetworkMagic} does not match configured ${this.network} network magic ${expectedNetworkMagic}`, 400, "GovernanceNetworkMismatch", { providerNetworkMagic, expectedNetworkMagic, network: this.network }, "FireblocksCardanoRawSDK");
+        }
+        return { providerNetworkMagic, expectedNetworkMagic };
+    }
+    static createInstance = async (params) => {
+        try {
+            const logger = new Logger(`app:fireblocks-cardano-raw-sdk`);
+            const { fireblocksConfig, vaultAccountId, network, chainProvider: providerConfig, iagonApiKey, assetCacheTTL, disableSslVerification = false, } = params;
+            const fireblocksService = new FireblocksService(fireblocksConfig);
+            const resolvedProviderConfig = providerConfig ?? {
+                type: "iagon",
+                apiKey: iagonApiKey ?? "",
+                assetCacheTTL,
+                disableSslVerification,
+            };
+            let iagonApiService;
+            let chainDataProvider;
+            if (resolvedProviderConfig.type === "iagon") {
+                iagonApiService = new IagonApiService(resolvedProviderConfig.apiKey, network, resolvedProviderConfig.assetCacheTTL, resolvedProviderConfig.disableSslVerification);
+                chainDataProvider = iagonApiService;
+            }
+            else {
+                chainDataProvider = new DemeterBlockfrostProvider({
+                    baseUrl: resolvedProviderConfig.baseUrl,
+                    apiKey: resolvedProviderConfig.apiKey,
+                    maxRetries: resolvedProviderConfig.maxRetries,
+                    pageSize: resolvedProviderConfig.pageSize,
+                });
+            }
+            const stakingService = iagonApiService
+                ? new StakingService(fireblocksService, iagonApiService, network)
+                : undefined;
+            const assetId = network === Networks.MAINNET ? SupportedAssets.ADA : SupportedAssets.ADA_TEST;
+            const wallet = await fireblocksService.getVaultAccountAddress(vaultAccountId, assetId);
+            const address = wallet.address;
+            if (!address) {
+                throw new Error(`Invalid address found for vault account ${vaultAccountId} and asset ${assetId}`);
+            }
+            const sdkInstance = new FireblocksCardanoRawSDK({
+                fireblocksService,
+                chainProvider: chainDataProvider,
+                iagonApiService,
+                stakingService,
+                network,
+                vaultAccountId,
+                logger,
+            });
+            return sdkInstance;
+        }
+        catch (error) {
+            throw new Error(`Error creating FireblocksCardanoRawSDK: ${error instanceof Error ? error.message : error}`, { cause: error });
+        }
+    };
+    checkProviderHealth = async () => {
+        return await this.chainProvider.checkHealth();
+    };
+    /** @deprecated Use checkProviderHealth(). */
+    checkIagonHealth = async () => {
+        if (this.chainProvider.kind !== "iagon") {
+            throw new ProviderCapabilityError(this.chainProvider.kind, ChainProviderCapability.IAGON_COMPATIBILITY);
+        }
+        return await this.chainProvider.checkHealth();
+    };
+    /**
+     * Get balance by address for a vault account
+     * @param options.index - Address index (default: 0)
+     * @param options.groupByPolicy - Group assets by policy (default: false)
+     * @param options.includeMetadata - Enrich tokens with metadata (default: false)
+     */
+    getBalanceByAddress = async (options = {}) => {
+        const { index = 0, groupByPolicy = false, includeMetadata = false } = options;
+        // Use cached address fetching
+        const address = await this.getAddressByIndex(this.assetId, index);
+        this.logger.info(`Getting balance for address ${address} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`);
+        const response = await this.chainProvider.getBalanceByAddress({
+            address,
+            groupByPolicy,
+        });
+        if (includeMetadata) {
+            return await this.enrichIagonResponse(response);
+        }
+        return response;
+    };
+    /**
+     * Get total balance for all addresses in a vault account
+     * @param options.groupBy - How to group the balance data
+     * @param options.includeMetadata - Whether to enrich tokens with metadata (names, decimals, logos)
+     */
+    getVaultBalance = async (options = {}) => {
+        const { groupBy = GroupByOptions.TOKEN, includeMetadata = false } = options;
+        this.logger.info(`Getting vault balance for vault ${this.vaultAccountId}, groupBy: ${groupBy}, includeMetadata: ${includeMetadata}`);
+        const addresses = await this.fireblocksService.getVaultAccountAddresses(this.vaultAccountId, this.assetId);
+        if (!addresses || addresses.length === 0) {
+            this.logger.warn(`No addresses found for vault ${this.vaultAccountId}`);
+            return this.getEmptyVaultBalance(groupBy);
+        }
+        // Fetch balances for all addresses in parallel
+        const balancePromises = addresses
+            .filter((addrData) => addrData.address && addrData.addressFormat === "BASE") // Filter out addresses without an address field / non-base addresses
+            .map(async (addrData) => {
+            const address = addrData.address;
+            const index = addrData.bip44AddressIndex || 0;
+            try {
+                const balance = await this.chainProvider.getBalanceByAddress({
+                    address,
+                    groupByPolicy: groupBy === GroupByOptions.POLICY,
+                });
+                return { address, index, balance };
+            }
+            catch (error) {
+                this.logger.error(`Error fetching balance for address ${address}:`, error);
+                return { address, index, balance: null };
+            }
+        });
+        const results = await Promise.all(balancePromises);
+        // Aggregate based on groupBy parameter
+        return this.aggregateVaultBalance(results, groupBy, includeMetadata);
+    };
+    /**
+     * Get balance by credential for a vault account
+     * @param options.credential - Payment credential
+     * @param options.groupByPolicy - Group assets by policy (default: false)
+     * @param options.includeMetadata - Enrich tokens with metadata (default: false)
+     */
+    getBalanceByCredential = async (options) => {
+        const { credential, groupByPolicy = false, includeMetadata = false } = options;
+        this.logger.info(`Getting balance for credential ${credential} (includeMetadata: ${includeMetadata})`);
+        const response = await this.requireIagonProvider(ChainProviderCapability.ACCOUNT_QUERIES).getBalanceByCredential({
+            credential,
+            groupByPolicy,
+        });
+        if (includeMetadata) {
+            return await this.enrichIagonResponse(response);
+        }
+        return response;
+    };
+    /**
+     * Get balance by stake key for a vault account
+     * Automatically derives the stake key from the vault account address.
+     * Note: The stake key is shared across all addresses in the vault account.
+     * @param options.groupByPolicy - Group assets by policy (default: false)
+     * @param options.includeMetadata - Enrich tokens with metadata (default: false)
+     */
+    getBalanceByStakeKey = async (options = {}) => {
+        const { groupByPolicy = false, includeMetadata = false } = options;
+        // Get the base address for this vault account (using index 0, but stake key is the same for all indices)
+        const baseAddress = await this.getAddressByIndex(this.assetId, 0);
+        // Derive the stake key from the base address
+        const isMainnet = this.network === Networks.MAINNET;
+        const stakeKey = getStakeAddressFromBaseAddress(baseAddress, isMainnet);
+        this.logger.info(`Getting balance for stake key ${stakeKey} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`);
+        const response = await this.requireIagonProvider(ChainProviderCapability.ACCOUNT_QUERIES).getBalanceByStakeKey({
+            stakeKey,
+            groupByPolicy,
+        });
+        if (includeMetadata) {
+            return await this.enrichIagonResponse(response);
+        }
+        return response;
+    };
+    /**
+     * Helper to return empty vault balance based on groupBy
+     */
+    getEmptyVaultBalance(groupBy) {
+        if (groupBy === GroupByOptions.ADDRESS) {
+            return { addresses: [], totals: { lovelace: "0", tokens: [] } };
+        }
+        else if (groupBy === GroupByOptions.POLICY) {
+            return { balances: [], totalLovelace: "0" };
+        }
+        else {
+            return { balances: [{ assetId: "ADA", amount: "0", tokenName: "ADA" }] };
+        }
+    }
+    /**
+     * Helper method to fetch and validate address for a vault account
+     */
+    async getAddressByIndex(assetId, index) {
+        const cacheKey = index;
+        const cachedAddress = this.addresses.get(cacheKey);
+        if (cachedAddress) {
+            this.logger.debug(`Using cached address for index ${index}`);
+            return cachedAddress;
+        }
+        const addressData = await this.fireblocksService.getVaultAccountAddress(this.vaultAccountId, assetId, index);
+        const address = addressData.address;
+        if (!address) {
+            throw new Error(`AddressNotFound: No address found for vault account ${this.vaultAccountId} at index ${index}`);
+        }
+        // Add to cache
+        this.addresses.set(cacheKey, address);
+        this.logger.debug(`Cached address for index ${index}`);
+        return address;
+    }
+    /**
+     * Resolves recipient address from either a direct address or a vault account ID.
+     * Validates that exactly one recipient option is provided.
+     */
+    async resolveRecipientAddress(recipientAddress, recipientVaultAccountId, recipientIndex = 0) {
+        if (!recipientAddress && !recipientVaultAccountId) {
+            throw new SdkApiError("Either recipientAddress or recipientVaultAccountId must be provided", 400, "ValidationError", { providedOptions: { recipientAddress, recipientVaultAccountId } }, "FireblocksCardanoRawSDK");
+        }
+        if (recipientAddress && recipientVaultAccountId) {
+            throw new SdkApiError("Cannot specify both recipientAddress and recipientVaultAccountId", 400, "ValidationError", { providedOptions: { recipientAddress, recipientVaultAccountId } }, "FireblocksCardanoRawSDK");
+        }
+        if (recipientVaultAccountId) {
+            const recipientAddressData = await this.fireblocksService.getVaultAccountAddress(recipientVaultAccountId, this.assetId, recipientIndex);
+            if (!recipientAddressData.address) {
+                throw new SdkApiError(`No address found for recipient vault account ${recipientVaultAccountId} at index ${recipientIndex}`, 404, "AddressNotFound", { recipientVaultAccountId, recipientIndex }, "FireblocksCardanoRawSDK");
+            }
+            return recipientAddressData.address;
+        }
+        return recipientAddress;
+    }
+    /**
+     * Fetches current network slot and returns TTL for transaction building.
+     */
+    async fetchCurrentTtl() {
+        const currentSlot = await this.chainProvider.getCurrentSlot();
+        this.logger.info(`Current slot: ${currentSlot}, calculating TTL`);
+        return calculateTtl(currentSlot);
+    }
+    /**
+     * Logs an error and re-throws it, wrapping non-Error values in a typed Error.
+     */
+    logAndRethrow(context, error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.logger.error(`${context} failed: ${errorMessage}`);
+        if (error instanceof Error)
+            throw error;
+        throw new Error(`${context}Failed: ${errorMessage}`);
+    }
+    /**
+     * Fetches transaction history across all vault addresses.
+     * Shared by getAllTransactionHistory() and getAllDetailedTxHistory().
+     */
+    async fetchAllVaultHistory(fetchFn, options) {
+        const emptyLastUpdated = { slot_no: 0, block_hash: "", block_time: "" };
+        const emptyPagination = {
+            limit: 0,
+            offset: 0,
+            total: 0,
+            hasMore: false,
+        };
+        const addressesResponse = await this.fireblocksService.getVaultAccountAddresses(this.vaultAccountId, this.assetId);
+        if (!addressesResponse || addressesResponse.length === 0) {
+            this.logger.warn(`No addresses found for vault account ${this.vaultAccountId}`);
+            return {
+                success: true,
+                data: options.groupByAddress ? {} : [],
+                pagination: emptyPagination,
+                last_updated: emptyLastUpdated,
+            };
+        }
+        const validAddresses = addressesResponse.filter((addr) => addr.address);
+        const allHistories = await Promise.all(validAddresses.map((addr) => fetchFn({ address: addr.address, ...options })));
+        const mostRecentUpdate = allHistories.reduce((latest, current) => {
+            if (!latest || (current.last_updated?.slot_no || 0) > (latest.slot_no || 0)) {
+                return current.last_updated || latest;
+            }
+            return latest;
+        }, allHistories[0]?.last_updated || emptyLastUpdated);
+        if (options.groupByAddress) {
+            const groupedData = {};
+            let totalTransactions = 0;
+            validAddresses.forEach((addr, index) => {
+                const transactions = allHistories[index].data || [];
+                transactions.sort((a, b) => (b.slot_no || 0) - (a.slot_no || 0));
+                groupedData[addr.address] = transactions;
+                totalTransactions += transactions.length;
+            });
+            const paginationLimit = options.limit || totalTransactions;
+            const paginationOffset = options.offset || 0;
+            return {
+                success: true,
+                data: groupedData,
+                pagination: {
+                    limit: paginationLimit,
+                    offset: paginationOffset,
+                    total: totalTransactions,
+                    hasMore: paginationOffset + paginationLimit < totalTransactions,
+                },
+                last_updated: mostRecentUpdate,
+            };
+        }
+        // Flat mode: merge, add address field, sort, deduplicate, paginate
+        const flatData = [];
+        validAddresses.forEach((addr, index) => {
+            const transactions = allHistories[index].data || [];
+            transactions.forEach((tx) => flatData.push({ ...tx, address: addr.address }));
+        });
+        flatData.sort((a, b) => (b.slot_no || 0) - (a.slot_no || 0));
+        const uniqueTransactions = flatData.filter((tx, index, self) => index === self.findIndex((t) => t.tx_hash === tx.tx_hash));
+        const totalTransactions = uniqueTransactions.length;
+        const paginationLimit = options.limit || totalTransactions;
+        const paginationOffset = options.offset || 0;
+        return {
+            success: true,
+            data: uniqueTransactions.slice(paginationOffset, paginationOffset + paginationLimit),
+            pagination: {
+                limit: paginationLimit,
+                offset: paginationOffset,
+                total: totalTransactions,
+                hasMore: paginationOffset + paginationLimit < totalTransactions,
+            },
+            last_updated: mostRecentUpdate,
+        };
+    }
+    /**
+     * Get transaction details by hash
+     */
+    getTransactionDetails = async (hash) => {
+        return await this.chainProvider.getTransactionDetails(hash);
+    };
+    /**
+     * Get UTXOs for a vault account address
+     */
+    getUtxosByAddress = async (index = 0) => {
+        const address = await this.getAddressByIndex(this.assetId, index);
+        this.logger.info(`Getting UTXOs for vault ${this.vaultAccountId} at index ${index} (address: ${address})`);
+        return await this.chainProvider.getUtxosByAddress(address);
+    };
+    /**
+     * Get UTXOs for all addresses in a vault account, grouped by address.
+     */
+    getUtxosByVaultAccountId = async () => {
+        const allAddresses = await this.fireblocksService.getVaultAccountAddresses(this.vaultAccountId, this.assetId);
+        const addresses = allAddresses.filter((addr) => addr.address && addr.addressFormat === "BASE");
+        this.logger.info(`Getting UTxOs for all ${addresses.length} BASE addresses in vault ${this.vaultAccountId}`);
+        const results = await Promise.all(addresses.map(async (addr) => {
+            const response = await this.chainProvider.getUtxosByAddress(addr.address);
+            return {
+                index: addr.bip44AddressIndex ?? 0,
+                address: addr.address,
+                utxos: response.data ?? [],
+            };
+        }));
+        return results.sort((a, b) => a.index - b.index);
+    };
+    /**
+     * Get transaction history for a vault account address
+     */
+    getTransactionHistory = async (index = 0, options = {}) => {
+        const address = await this.getAddressByIndex(this.assetId, index);
+        this.logger.info(`Getting transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`);
+        return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory({
+            address,
+            ...options,
+        });
+    };
+    /**
+     * Get detailed transaction history for a vault account address
+     */
+    getDetailedTxHistory = async (index = 0, options = {}) => {
+        const address = await this.getAddressByIndex(this.assetId, index);
+        this.logger.info(`Getting detailed transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`);
+        return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory({
+            address,
+            ...options,
+        });
+    };
+    /**
+     * Get transaction history for all addresses in the vault account
+     * @param options.groupByAddress - If true, returns data grouped by address. If false, returns flat array with address field
+     */
+    getAllTransactionHistory = async (options = {}) => {
+        this.logger.info(`Getting transaction history for all addresses in vault ${this.vaultAccountId}`);
+        return this.fetchAllVaultHistory((params) => this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory(params), options);
+    };
+    /**
+     * Get detailed transaction history for all addresses in the vault account
+     * @param options.groupByAddress - If true, returns data grouped by address. If false, returns flat array with address field
+     */
+    getAllDetailedTxHistory = async (options = {}) => {
+        this.logger.info(`Getting detailed transaction history for all addresses in vault ${this.vaultAccountId}`);
+        return this.fetchAllVaultHistory((params) => this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory(params), options);
+    };
+    /**
+     * Selects and validates UTXOs for the transaction
+     * Minimum lovelace values are calculated dynamically based on policies
+     */
+    async selectAndValidateUtxos(params) {
+        const utxoResult = await fetchAndSelectUtxosForCnt({
+            chainProvider: this.chainProvider,
+            ...params,
+        });
+        if (!utxoResult) {
+            throw new SdkApiError("No suitable UTXOs found for this transaction", 400, "UtxoSelectionFailed", {
+                address: params.address,
+                tokenPolicyId: params.tokenPolicyId,
+                tokenName: params.tokenName,
+            }, "FireblocksCardanoRawSDK");
+        }
+        const { selectedUtxos, accumulatedAda, accumulatedTokenAmount, minRecipientLovelace, minChangeLovelace, release, } = utxoResult;
+        const adaTarget = minRecipientLovelace + params.transactionFee;
+        if (accumulatedTokenAmount < params.requiredTokenAmount || accumulatedAda < adaTarget) {
+            const tokenShortfall = Math.max(0, params.requiredTokenAmount - accumulatedTokenAmount);
+            const adaShortfall = Math.max(0, adaTarget - accumulatedAda);
+            let message = "Insufficient balance. ";
+            if (tokenShortfall > 0) {
+                message += `Token: need ${params.requiredTokenAmount.toLocaleString()}, have ${accumulatedTokenAmount.toLocaleString()} (short ${tokenShortfall.toLocaleString()}). `;
+            }
+            if (adaShortfall > 0) {
+                const required = formatWithDecimals(adaTarget, CardanoConstants.ADA_DECIMALS);
+                const recipient = formatWithDecimals(minRecipientLovelace, CardanoConstants.ADA_DECIMALS);
+                const fee = formatWithDecimals(params.transactionFee, CardanoConstants.ADA_DECIMALS);
+                const have = formatWithDecimals(accumulatedAda, CardanoConstants.ADA_DECIMALS);
+                const short = formatWithDecimals(adaShortfall, CardanoConstants.ADA_DECIMALS);
+                message += `ADA: need ${required.value} ADA (${required.raw} lovelace) = ${recipient.value} ADA for recipient + ${fee.value} ADA fee, have ${have.value} ADA (${have.raw} lovelace), short ${short.value} ADA (${short.raw} lovelace).`;
+            }
+            throw new SdkApiError(message.trim(), 400, "InsufficientBalance", {
+                requiredTokenAmount: params.requiredTokenAmount,
+                accumulatedTokenAmount,
+                tokenShortfall,
+                requiredAda: adaTarget,
+                accumulatedAda,
+                adaShortfall,
+                breakdown: {
+                    minRecipientLovelace,
+                    minChangeLovelace,
+                    transactionFee: params.transactionFee,
+                },
+            }, "FireblocksCardanoRawSDK");
+        }
+        return {
+            selectedUtxos,
+            accumulatedAda,
+            accumulatedTokenAmount,
+            minRecipientLovelace,
+            minChangeLovelace,
+            release,
+        };
+    }
+    /**
+     * Calculates the transaction hash from transaction body
+     */
+    calculateTransactionHash(txBody) {
+        const txBodyBytes = txBody.to_bytes();
+        const hashBytes = blake2b(txBodyBytes, undefined, 32);
+        return Buffer.from(hashBytes).toString("hex");
+    }
+    /**
+     * Creates Fireblocks transaction payload for signing
+     */
+    createFireblocksTransactionPayload(assetId, txHashHex, externalTxId) {
+        return {
+            assetId,
+            operation: TransactionOperation.Raw,
+            ...(externalTxId && { externalTxId }),
+            source: {
+                type: TransferPeerPathType.VaultAccount,
+                id: this.vaultAccountId,
+            },
+            note: "Transfer of Cardano tokens via FireblocksCardanoRawSDK",
+            extraParameters: {
+                rawMessageData: {
+                    messages: [
+                        {
+                            content: txHashHex,
+                        },
+                    ],
+                },
+            },
+        };
+    }
+    /**
+     * Reduces the matched Fireblocks authorization policy to non-identifying evidence.
+     */
+    validateGovernanceAuthorization(requirements, transaction) {
+        if (transaction.externalTxId !== requirements.externalTxId) {
+            throw new SdkApiError("Fireblocks response externalTxId does not match the governed signing request", 502, "GovernanceCorrelationError", { expected: requirements.externalTxId, received: transaction.externalTxId }, "FireblocksCardanoRawSDK");
+        }
+        const authorization = transaction.authorizationInfo;
+        if (!authorization?.groups?.length) {
+            throw new SdkApiError("Fireblocks did not return authorization-group evidence for the governed RAW signing request", 403, "GovernanceEvidenceMissing", { fireblocksTransactionId: transaction.id }, "FireblocksCardanoRawSDK");
+        }
+        const approvedUsers = new Set();
+        const groups = authorization.groups.map((group) => {
+            const statuses = Object.entries(group.users ?? {});
+            const documentedStatuses = new Set(["APPROVED", "PENDING_AUTHORIZATION", "REJECTED", "NA"]);
+            if (statuses.some(([, status]) => !documentedStatuses.has(status))) {
+                throw new SdkApiError("Fireblocks returned an unknown authorization status", 502, "GovernanceEvidenceInvalid", { fireblocksTransactionId: transaction.id }, "FireblocksCardanoRawSDK");
+            }
+            for (const [userId, status] of statuses) {
+                if (status === "APPROVED")
+                    approvedUsers.add(userId);
+            }
+            const approved = statuses.filter(([, status]) => status === "APPROVED").length;
+            const pending = statuses.filter(([, status]) => status === "PENDING_AUTHORIZATION").length;
+            const rejected = statuses.filter(([, status]) => status === "REJECTED").length;
+            const notApplicable = statuses.filter(([, status]) => status === "NA").length;
+            const threshold = group.th ?? 0;
+            return {
+                threshold,
+                approved,
+                pending,
+                rejected,
+                notApplicable,
+                satisfied: threshold > 0 && approved >= threshold,
+            };
+        });
+        if (authorization.logic !== "AND" && authorization.logic !== "OR") {
+            throw new SdkApiError("Fireblocks returned missing or unknown authorization-group logic", 502, "GovernanceEvidenceInvalid", { fireblocksTransactionId: transaction.id }, "FireblocksCardanoRawSDK");
+        }
+        const logic = authorization.logic;
+        const groupsSatisfied = logic === "OR"
+            ? groups.some((group) => group.satisfied)
+            : groups.every((group) => group.satisfied);
+        const signers = new Set(transaction.signedBy ?? []);
+        const signerCount = signers.size;
+        const allowedSigners = new Set(requirements.allowedSignerIds);
+        const allSignersDesignated = signerCount > 0 && [...signers].every((signerId) => allowedSigners.has(signerId));
+        const requirementsSatisfied = groupsSatisfied &&
+            approvedUsers.size >= requirements.minimumApprovals &&
+            signerCount >= requirements.minimumSigners &&
+            allSignersDesignated;
+        if (!requirementsSatisfied) {
+            throw new SdkApiError("Fireblocks authorization or designated-signer requirements were not satisfied", 403, "GovernanceApprovalInsufficient", {
+                authorizationLogic: logic,
+                groups,
+                approvedAuthorizers: approvedUsers.size,
+                requiredApprovals: requirements.minimumApprovals,
+                signerCount,
+                requiredSigners: requirements.minimumSigners,
+                configuredDesignatedSignerCount: allowedSigners.size,
+                allSignersDesignated,
+            }, "FireblocksCardanoRawSDK");
+        }
+        return {
+            authorizationInfoPresent: true,
+            evidenceSource: "fireblocks-authorization-info",
+            logic,
+            allowOperatorAsAuthorizer: authorization.allowOperatorAsAuthorizer ?? false,
+            groups,
+            approvedAuthorizers: approvedUsers.size,
+            signerCount,
+            designatedSignerEvidencePresent: true,
+            configuredDesignatedSignerCount: allowedSigners.size,
+            allSignersDesignated: true,
+            minimumApprovals: requirements.minimumApprovals,
+            minimumSigners: requirements.minimumSigners,
+            requirementsSatisfied: true,
+        };
+    }
+    /** Signs the exact Cardano body hash and optionally captures governance evidence. */
+    async signTransactionWithEvidence(txBody, assetId = SupportedAssets.ADA, governance, expectedSignerAddress) {
+        const txHashHex = this.calculateTransactionHash(txBody);
+        if (governance && !expectedSignerAddress) {
+            throw new SdkApiError("A source address is required to verify the governed Fireblocks signer", 400, "GovernanceSignerAddressMissing", undefined, "FireblocksCardanoRawSDK");
+        }
+        const transactionPayload = this.createFireblocksTransactionPayload(assetId, txHashHex, governance?.externalTxId);
+        const txData = await this.fireblocksService.signTransaction(transactionPayload);
+        if (!txData) {
+            throw new Error("SigningFailed: Fireblocks returned no signing response");
+        }
+        if (txData.id !== txData.transaction.id) {
+            throw new SdkApiError("Fireblocks signing response IDs do not match", 502, "GovernanceCorrelationError", { signingResponseId: txData.id, transactionResponseId: txData.transaction.id }, "FireblocksCardanoRawSDK");
+        }
+        if (governance && txData.transaction.status !== TransactionStateEnum.Completed) {
+            throw new SdkApiError("Fireblocks governed RAW signing did not reach COMPLETED status", 502, "GovernanceAuthorizationIncomplete", { fireblocksTransactionId: txData.id, status: txData.transaction.status }, "FireblocksCardanoRawSDK");
+        }
+        if (governance && txData.data.length !== 1) {
+            throw new SdkApiError("Fireblocks must return exactly one signed message for a governed Cardano transaction", 502, "GovernanceCorrelationError", { fireblocksTransactionId: txData.id, signedMessageCount: txData.data.length }, "FireblocksCardanoRawSDK");
+        }
+        const signatureResponse = txData.data[0];
+        if (!signatureResponse?.publicKey || !signatureResponse?.signature?.fullSig) {
+            throw new Error("SigningFailed: Invalid signature response from Fireblocks");
+        }
+        if (governance && signatureResponse.content !== txHashHex) {
+            throw new SdkApiError("Fireblocks signed-message content does not match the Cardano transaction body hash", 502, "GovernanceCorrelationError", { transactionBodyHash: txHashHex, signedMessageHash: signatureResponse.content }, "FireblocksCardanoRawSDK");
+        }
+        const publicKeyBytes = Uint8Array.from(Buffer.from(signatureResponse.publicKey, "hex"));
+        const signatureBytes = Uint8Array.from(Buffer.from(signatureResponse.signature.fullSig, "hex"));
+        const pubKey = PublicKey.from_bytes(publicKeyBytes);
+        const cardanoSig = Ed25519Signature.from_bytes(signatureBytes);
+        if (!pubKey.verify(Buffer.from(txHashHex, "hex"), cardanoSig)) {
+            pubKey.free();
+            cardanoSig.free();
+            throw new SdkApiError("Fireblocks signature did not verify against the Cardano transaction body hash", 502, "SignatureVerificationError", { transactionBodyHash: txHashHex }, "FireblocksCardanoRawSDK");
+        }
+        if (governance) {
+            const sourceAddress = Address.from_bech32(expectedSignerAddress);
+            const paymentCredential = BaseAddress.from_address(sourceAddress)?.payment_cred() ??
+                EnterpriseAddress.from_address(sourceAddress)?.payment_cred() ??
+                PointerAddress.from_address(sourceAddress)?.payment_cred();
+            const expectedKeyHash = paymentCredential?.to_keyhash();
+            const actualKeyHash = pubKey.hash();
+            const signerMatchesSource = expectedKeyHash !== undefined && expectedKeyHash.to_hex() === actualKeyHash.to_hex();
+            sourceAddress.free();
+            if (!signerMatchesSource) {
+                pubKey.free();
+                cardanoSig.free();
+                throw new SdkApiError("Fireblocks returned a signing key that does not control the selected source address", 502, "GovernanceSignerMismatch", { transactionBodyHash: txHashHex }, "FireblocksCardanoRawSDK");
+            }
+        }
+        const cardanoPubKey = Vkey.new(pubKey);
+        pubKey.free();
+        const witness = Vkeywitness.new(cardanoPubKey, cardanoSig);
+        cardanoPubKey.free();
+        cardanoSig.free();
+        const witnesses = Vkeywitnesses.new();
+        witnesses.add(witness);
+        witness.free();
+        const witnessSet = TransactionWitnessSet.new();
+        witnessSet.set_vkeys(witnesses);
+        witnesses.free();
+        const signedTx = Transaction.new(txBody, witnessSet);
+        const signedBody = signedTx.body();
+        const transactionBodyUnchanged = Buffer.from(signedBody.to_bytes()).equals(Buffer.from(txBody.to_bytes()));
+        signedBody.free();
+        if (!transactionBodyUnchanged) {
+            signedTx.free();
+            witnessSet.free();
+            throw new SdkApiError("The transaction body changed while assembling the Fireblocks witness", 500, "GovernanceCorrelationError", { transactionBodyHash: txHashHex }, "FireblocksCardanoRawSDK");
+        }
+        // Verify the fee is sufficient using Cardano's min_fee calculation
+        const minRequiredFee = calculateTransactionFee(signedTx);
+        witnessSet.free();
+        const allocatedFee = parseInt(txBody.fee().to_str());
+        if (minRequiredFee > allocatedFee) {
+            throw new SdkApiError(`Transaction requires minimum ${minRequiredFee} lovelace but only ${allocatedFee} lovelace was allocated. This indicates a bug in fee calculation.`, 500, "FeeEstimationError", { minRequiredFee, allocatedFee, difference: minRequiredFee - allocatedFee }, "FireblocksCardanoRawSDK");
+        }
+        const feeDifference = allocatedFee - minRequiredFee;
+        this.logger.info(`Transaction fee verified: allocated ${allocatedFee} lovelace, ` +
+            `minimum required ${minRequiredFee} lovelace (margin: ${feeDifference} lovelace)`);
+        const governanceEvidence = governance
+            ? {
+                externalTxId: governance.externalTxId,
+                fireblocksTransactionId: txData.id,
+                fireblocksStatus: txData.transaction.status ?? "UNKNOWN",
+                transactionBodyHash: txHashHex,
+                signedMessageHash: signatureResponse.content,
+                matchedPolicy: this.validateGovernanceAuthorization(governance, txData.transaction),
+                signatureVerified: true,
+                signerMatchesSource: true,
+                transactionBodyUnchanged: true,
+            }
+            : undefined;
+        return { signedTransaction: signedTx, governance: governanceEvidence };
+    }
+    /** Existing signing path retained for non-governed operations. */
+    async signTransaction(txBody, assetId = SupportedAssets.ADA) {
+        return (await this.signTransactionWithEvidence(txBody, assetId)).signedTransaction;
+    }
+    // ─── Transfer Architecture ──────────────────────────────────────────────────
+    //
+    // Three transfer types with two different flows:
+    //
+    // 1. CNT (single token) & Multi-token:
+    //    prepare*Transaction() → signTransaction() → submitTransaction()
+    //    Both build tx locally, sign via Fireblocks raw signing, submit to chain.
+    //    Fee estimation uses the same prepare path so estimates match actuals.
+    //
+    // 2. ADA (native):
+    //    Demeter builds locally, signs the exact body hash through Fireblocks RAW,
+    //    then submits through the provider. IAGON retains the native Fireblocks
+    //    transfer path for backward compatibility.
+    //    Fee estimation builds locally (prepareAdaTransaction) for preview only;
+    //    actual transfer uses Fireblocks co-signing infrastructure.
+    //
+    // This split exists because Fireblocks handles ADA natively, while CNTs
+    // require raw transaction construction.
+    // ────────────────────────────────────────────────────────────────────────────
+    /**
+     * Private helper that prepares and validates CNT transaction parameters.
+     * Shared by both estimateTransactionFee() and transfer()
+     */
+    async prepareTransaction(params) {
+        const { index = 0, recipientAddress, recipientVaultAccountId, recipientIndex = 0, tokenPolicyId, tokenName, requiredTokenAmount, lock = false, } = params;
+        // Block native ADA transfers
+        const isNativeAdaTransfer = (tokenName === SupportedAssets.ADA || tokenName === SupportedAssets.ADA_TEST) &&
+            tokenPolicyId === "";
+        if ((!tokenPolicyId && !tokenName) || isNativeAdaTransfer) {
+            throw new SdkApiError("Native ADA transfers are not supported by this SDK. Please use the Fireblocks console for ADA transfers.", 400, "UnsupportedOperation", { tokenPolicyId, tokenName }, "FireblocksCardanoRawSDK");
+        }
+        if (!tokenPolicyId || !tokenName) {
+            throw new SdkApiError("For token transfers, please provide both 'tokenPolicyId' and 'tokenName' parameters.", 400, "UnsupportedOperation", { tokenPolicyId, tokenName }, "FireblocksCardanoRawSDK");
+        }
+        const resolvedRecipientAddress = await this.resolveRecipientAddress(recipientAddress, recipientVaultAccountId, recipientIndex);
+        const senderAddress = await this.getAddressByIndex(this.assetId, index);
+        const { selectedUtxos, minRecipientLovelace, release } = await this.selectAndValidateUtxos({
+            address: senderAddress,
+            tokenPolicyId,
+            tokenName,
+            requiredTokenAmount,
+            transactionFee: CardanoAmounts.ESTIMATED_MAX_FEE,
+            lock,
+        });
+        const txInputs = createTransactionInputs(selectedUtxos);
+        const ttl = await this.fetchCurrentTtl();
+        const recipientAddr = Address.from_bech32(resolvedRecipientAddress);
+        const senderAddr = Address.from_bech32(senderAddress);
+        const { txBody, fee } = buildCntTransactionWithCalculatedFee({
+            requiredLovelace: minRecipientLovelace,
+            recipientAddress: recipientAddr,
+            senderAddress: senderAddr,
+            tokenPolicyId,
+            tokenName,
+            transferAmount: requiredTokenAmount,
+            selectedUtxos,
+        }, txInputs, ttl, WITNESS_COUNT_PAYMENT_KEY_ONLY);
+        recipientAddr.free();
+        senderAddr.free();
+        return { txBody, senderAddress, resolvedRecipientAddress, minRecipientLovelace, fee, release };
+    }
+    /**
+     * Estimates transaction fee for a CNT transfer without signing or submitting
+     *
+     * @param request - Fee estimation request parameters
+     * @returns Fee estimation response with detailed breakdown
+     * @throws SdkApiError if validation fails or insufficient balance
+     */
+    estimateTransactionFee = async (request) => {
+        const { requiredTokenAmount, grossAmount = false } = request;
+        let txBody = null;
+        try {
+            this.logger.info(`Estimating transaction fee for ${requiredTokenAmount} ${request.tokenName} (grossAmount: ${grossAmount})`);
+            // Prepare transaction (reuses validation and building logic)
+            const prepareResult = await this.prepareTransaction(request);
+            txBody = prepareResult.txBody;
+            const { minRecipientLovelace, fee: feeLovelaceNum } = prepareResult;
+            const feeLovelace = BigInt(feeLovelaceNum);
+            const feeFormatted = formatWithDecimals(feeLovelaceNum, CardanoConstants.ADA_DECIMALS);
+            // Calculate minimum ADA required in output
+            const minAdaFormatted = formatWithDecimals(minRecipientLovelace, CardanoConstants.ADA_DECIMALS);
+            // Calculate total cost based on grossAmount flag
+            let totalCostLovelace;
+            let recipientReceivesAmount;
+            if (grossAmount) {
+                totalCostLovelace = BigInt(minRecipientLovelace);
+                recipientReceivesAmount = requiredTokenAmount;
+            }
+            else {
+                totalCostLovelace = BigInt(minRecipientLovelace) + feeLovelace;
+                recipientReceivesAmount = requiredTokenAmount;
+            }
+            const totalCostFormatted = formatWithDecimals(Number(totalCostLovelace), CardanoConstants.ADA_DECIMALS);
+            this.logger.info(`Fee estimation complete: ${feeFormatted.value} ADA, min ADA: ${minAdaFormatted.value} ADA, total cost: ${totalCostFormatted.value} ADA`);
+            return {
+                fee: {
+                    ada: feeFormatted.value,
+                    lovelace: feeLovelace.toString(),
+                },
+                minAdaRequired: {
+                    ada: minAdaFormatted.value,
+                    lovelace: minRecipientLovelace.toString(),
+                },
+                totalCost: {
+                    ada: totalCostFormatted.value,
+                    lovelace: totalCostLovelace.toString(),
+                },
+                recipientReceives: {
+                    amount: recipientReceivesAmount.toString(),
+                    ada: minAdaFormatted.value,
+                },
+            };
+        }
+        catch (error) {
+            this.logAndRethrow("FeeEstimation", error);
+        }
+        finally {
+            // Always free WASM objects to prevent memory leaks
+            if (txBody)
+                txBody.free();
+        }
+    };
+    transfer = async (options) => {
+        const { recipientVaultAccountId, tokenPolicyId, tokenName, requiredTokenAmount } = options;
+        let release = () => { };
+        try {
+            // Log transfer initiation
+            if (recipientVaultAccountId) {
+                this.logger.info(`Initiating vault-to-vault transfer: ${requiredTokenAmount} ${tokenName} from vault ${this.vaultAccountId} to vault ${recipientVaultAccountId}`);
+            }
+            else {
+                this.logger.info(`Initiating transfer: ${requiredTokenAmount} ${tokenName} to ${options.recipientAddress}`);
+            }
+            // Prepare and validate transaction and lock UTxOs to prevent concurrent double-spend
+            const { txBody, senderAddress, resolvedRecipientAddress, fee, release: _release, } = await this.prepareTransaction({ ...options, lock: true });
+            release = _release; // promote to outer scope so finally can call it
+            const feeFormatted = formatWithDecimals(fee, CardanoConstants.ADA_DECIMALS);
+            this.logger.info(`Transaction prepared, recipient: ${resolvedRecipientAddress}, fee: ${feeFormatted.value} ADA`);
+            // Sign transaction with Fireblocks
+            const signedTransaction = await this.signTransaction(txBody);
+            // Submit transaction to blockchain
+            const txHash = await submitTransaction(this.chainProvider, signedTransaction);
+            this.logger.info(`Transfer successful: ${txHash} (fee: ${feeFormatted.value} ADA)`);
+            return {
+                txHash,
+                senderAddress,
+                tokenPolicyId,
+                tokenName,
+                amount: requiredTokenAmount,
+                fee: {
+                    lovelace: fee.toString(),
+                    ada: feeFormatted.value,
+                },
+            };
+        }
+        catch (error) {
+            this.logAndRethrow("Transfer", error);
+        }
+        finally {
+            release();
+        }
+    };
+    /**
+     * Shared preparation logic for native ADA transfers.
+     * Validates inputs, selects UTxOs (preferring ADA-only), and builds the transaction body.
+     * Called by both transferAda() and estimateAdaTransactionFee().
+     */
+    async prepareAdaTransaction(params) {
+        const { index = 0, recipientAddress, recipientVaultAccountId, recipientIndex = 0, lovelaceAmount, } = params;
+        // Validate amount
+        if (!Number.isSafeInteger(lovelaceAmount) || lovelaceAmount <= 0) {
+            throw new SdkApiError("lovelaceAmount must be a positive integer", 400, "ValidationError", { lovelaceAmount }, "FireblocksCardanoRawSDK");
+        }
+        if (lovelaceAmount < CardanoConstants.MIN_UTXO_BASE_LOVELACE) {
+            throw new SdkApiError(`lovelaceAmount ${lovelaceAmount} is below the Cardano protocol minimum of ${CardanoConstants.MIN_UTXO_BASE_LOVELACE} lovelace (1 ADA)`, 400, "BelowMinimumUtxo", { lovelaceAmount, minimum: CardanoConstants.MIN_UTXO_BASE_LOVELACE }, "FireblocksCardanoRawSDK");
+        }
+        const resolvedRecipientAddress = await this.resolveRecipientAddress(recipientAddress, recipientVaultAccountId, recipientIndex);
+        const senderAddress = await this.getAddressByIndex(this.assetId, index);
+        // Select UTxOs - prefer ADA-only, fall back to multi-asset if needed
+        const { selectedUtxos, accumulatedAda, changeTokenAssets, minChangeLovelace } = await fetchAndSelectUtxosForAda({
+            chainProvider: this.chainProvider,
+            address: senderAddress,
+            lovelaceAmount,
+            transactionFee: CardanoAmounts.ESTIMATED_MAX_FEE,
+        });
+        // Conservative balance check before building
+        const minimumRequired = lovelaceAmount + CardanoAmounts.ESTIMATED_MAX_FEE + minChangeLovelace;
+        if (accumulatedAda < minimumRequired) {
+            const required = formatWithDecimals(minimumRequired, CardanoConstants.ADA_DECIMALS);
+            const have = formatWithDecimals(accumulatedAda, CardanoConstants.ADA_DECIMALS);
+            const short = formatWithDecimals(minimumRequired - accumulatedAda, CardanoConstants.ADA_DECIMALS);
+            throw new SdkApiError(`Insufficient ADA: need ${required.value} ADA, have ${have.value} ADA (short ${short.value} ADA)`, 400, "InsufficientBalance", {
+                requiredLovelace: minimumRequired,
+                accumulatedLovelace: accumulatedAda,
+                breakdown: {
+                    lovelaceAmount,
+                    estimatedFee: CardanoAmounts.ESTIMATED_MAX_FEE,
+                    minChangeLovelace,
+                },
+            }, "FireblocksCardanoRawSDK");
+        }
+        const numTokenPolicies = countDistinctPolicies(changeTokenAssets);
+        if (numTokenPolicies > 0) {
+            this.logger.warn(`ADA transfer: selected UTxOs contain tokens (${numTokenPolicies} policies). All tokens will be returned to sender in change output.`);
+        }
+        // Build transaction with converging fee
+        const txInputs = createTransactionInputs(selectedUtxos);
+        const ttl = await this.fetchCurrentTtl();
+        const recipientAddrAda = Address.from_bech32(resolvedRecipientAddress);
+        const senderAddrAda = Address.from_bech32(senderAddress);
+        const { txBody, fee } = buildAdaTransactionWithCalculatedFee({
+            lovelaceAmount,
+            recipientAddress: recipientAddrAda,
+            senderAddress: senderAddrAda,
+            selectedUtxos,
+        }, txInputs, ttl, WITNESS_COUNT_PAYMENT_KEY_ONLY);
+        recipientAddrAda.free();
+        senderAddrAda.free();
+        return {
+            txBody,
+            senderAddress,
+            resolvedRecipientAddress,
+            fee,
+            changeTokenAssets,
+            selectedUtxos,
+            accumulatedAda,
+        };
+    }
+    /** Extract a flat policyId.assetNameHex map from a Cardano output. */
+    getOutputAssets(output) {
+        const result = {};
+        const value = output.amount();
+        const multiAsset = value.multiasset();
+        if (!multiAsset) {
+            value.free();
+            return result;
+        }
+        const policies = multiAsset.keys();
+        for (let policyIndex = 0; policyIndex < policies.len(); policyIndex++) {
+            const policy = policies.get(policyIndex);
+            const assets = multiAsset.get(policy);
+            if (!assets)
+                continue;
+            const names = assets.keys();
+            for (let assetIndex = 0; assetIndex < names.len(); assetIndex++) {
+                const name = names.get(assetIndex);
+                const quantity = assets.get(name);
+                if (!quantity)
+                    continue;
+                const numericQuantity = Number(quantity.to_str());
+                if (!Number.isSafeInteger(numericQuantity) || numericQuantity < 0) {
+                    throw new SdkApiError("Governance validation encountered an unsafe Cardano asset quantity", 500, "GovernanceValidationError", { policyId: policy.to_hex() }, "FireblocksCardanoRawSDK");
+                }
+                const assetName = Buffer.from(name.name()).toString("hex");
+                result[`${policy.to_hex()}.${assetName}`] = numericQuantity;
+            }
+        }
+        return result;
+    }
+    /** Validate the complete locally built Cardano intent before Fireblocks sees a hash. */
+    validateGovernedAdaPreflight(options, prepared, requirements, networkEvidence) {
+        if (!requirements.externalTxId?.trim()) {
+            throw new SdkApiError("governance.externalTxId is required", 400, "GovernanceValidationError", undefined, "FireblocksCardanoRawSDK");
+        }
+        if (!Array.isArray(requirements.allowedRecipientAddresses) ||
+            !requirements.allowedRecipientAddresses.length) {
+            throw new SdkApiError("governance.allowedRecipientAddresses must contain at least one address", 400, "GovernanceValidationError", undefined, "FireblocksCardanoRawSDK");
+        }
+        if (!Array.isArray(requirements.allowedSignerIds) ||
+            !requirements.allowedSignerIds.length ||
+            requirements.allowedSignerIds.some((signerId) => !signerId?.trim()) ||
+            new Set(requirements.allowedSignerIds).size !== requirements.allowedSignerIds.length) {
+            throw new SdkApiError("governance.allowedSignerIds must contain unique, non-empty Fireblocks user IDs", 400, "GovernanceValidationError", undefined, "FireblocksCardanoRawSDK");
+        }
+        if (!requirements.allowedRecipientAddresses.includes(prepared.resolvedRecipientAddress)) {
+            throw new SdkApiError("Resolved recipient is not present in the governance allowlist", 403, "GovernanceRecipientBlocked", { recipientAddress: prepared.resolvedRecipientAddress }, "FireblocksCardanoRawSDK");
+        }
+        for (const [field, value] of [
+            ["maxFeeLovelace", requirements.maxFeeLovelace],
+            ["minimumApprovals", requirements.minimumApprovals],
+            ["minimumSigners", requirements.minimumSigners],
+        ]) {
+            if (!Number.isSafeInteger(value) || value < 1) {
+                throw new SdkApiError(`governance.${field} must be a positive safe integer`, 400, "GovernanceValidationError", { field, value }, "FireblocksCardanoRawSDK");
+            }
+        }
+        if (prepared.fee > requirements.maxFeeLovelace) {
+            throw new SdkApiError(`Calculated fee ${prepared.fee} exceeds governance maximum ${requirements.maxFeeLovelace}`, 403, "GovernanceFeeBlocked", { feeLovelace: prepared.fee, maxFeeLovelace: requirements.maxFeeLovelace }, "FireblocksCardanoRawSDK");
+        }
+        let sender;
+        let recipient;
+        try {
+            sender = Address.from_bech32(prepared.senderAddress);
+            recipient = Address.from_bech32(prepared.resolvedRecipientAddress);
+        }
+        catch {
+            throw new SdkApiError("Sender or recipient is not a valid Cardano bech32 address", 400, "GovernanceValidationError", undefined, "FireblocksCardanoRawSDK");
+        }
+        const expectedNetworkId = this.network === Networks.MAINNET ? 1 : 0;
+        if (sender.network_id() !== expectedNetworkId || recipient.network_id() !== expectedNetworkId) {
+            sender.free();
+            recipient.free();
+            throw new SdkApiError(`Sender and recipient must belong to the configured ${this.network} network`, 400, "GovernanceNetworkMismatch", { network: this.network }, "FireblocksCardanoRawSDK");
+        }
+        sender.free();
+        recipient.free();
+        const inputs = prepared.txBody.inputs();
+        const actualInputs = [];
+        for (let index = 0; index < inputs.len(); index++) {
+            const input = inputs.get(index);
+            const transactionId = input.transaction_id();
+            actualInputs.push(`${transactionId.to_hex()}#${input.index()}`);
+        }
+        const expectedInputs = prepared.selectedUtxos
+            .map((utxo) => `${utxo.transaction_id}#${utxo.output_index}`)
+            .sort();
+        actualInputs.sort();
+        if (JSON.stringify(actualInputs) !== JSON.stringify(expectedInputs)) {
+            throw new SdkApiError("Transaction inputs do not match the selected Cardano UTxOs", 500, "GovernanceValidationError", { inputCount: actualInputs.length, selectedUtxoCount: expectedInputs.length }, "FireblocksCardanoRawSDK");
+        }
+        const outputs = prepared.txBody.outputs();
+        if (outputs.len() !== 2) {
+            throw new SdkApiError("Governed ADA transactions must contain exactly recipient and change outputs", 500, "GovernanceValidationError", { outputCount: outputs.len() }, "FireblocksCardanoRawSDK");
+        }
+        const recipientOutput = outputs.get(0);
+        const changeOutput = outputs.get(1);
+        const recipientOutputAddress = recipientOutput.address();
+        const changeOutputAddress = changeOutput.address();
+        const recipientValue = recipientOutput.amount();
+        const changeValue = changeOutput.amount();
+        const recipientLovelace = Number(recipientValue.coin().to_str());
+        const changeLovelace = Number(changeValue.coin().to_str());
+        const expectedChange = prepared.accumulatedAda - options.lovelaceAmount - prepared.fee;
+        for (const [field, value] of [
+            ["amountLovelace", options.lovelaceAmount],
+            ["feeLovelace", prepared.fee],
+            ["inputLovelace", prepared.accumulatedAda],
+            ["recipientLovelace", recipientLovelace],
+            ["changeLovelace", changeLovelace],
+            ["expectedChangeLovelace", expectedChange],
+        ]) {
+            if (!Number.isSafeInteger(value) || value < 0) {
+                throw new SdkApiError(`Governance validation encountered unsafe ${field}`, 500, "GovernanceValidationError", { field }, "FireblocksCardanoRawSDK");
+            }
+        }
+        if (recipientOutputAddress.to_bech32() !== prepared.resolvedRecipientAddress ||
+            changeOutputAddress.to_bech32() !== prepared.senderAddress ||
+            recipientLovelace !== options.lovelaceAmount ||
+            changeLovelace !== expectedChange) {
+            throw new SdkApiError("Transaction outputs do not match the governed recipient, amount, or change intent", 500, "GovernanceValidationError", {
+                recipientLovelace,
+                expectedRecipientLovelace: options.lovelaceAmount,
+                changeLovelace,
+                expectedChangeLovelace: expectedChange,
+            }, "FireblocksCardanoRawSDK");
+        }
+        const recipientAssets = this.getOutputAssets(recipientOutput);
+        const actualChangeAssets = this.getOutputAssets(changeOutput);
+        const sortRecord = (record) => Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)));
+        const assetsPreserved = Object.keys(recipientAssets).length === 0 &&
+            JSON.stringify(sortRecord(actualChangeAssets)) ===
+                JSON.stringify(sortRecord(prepared.changeTokenAssets));
+        if (!assetsPreserved) {
+            throw new SdkApiError("Native assets were not preserved exactly in the Cardano change output", 500, "GovernanceAssetPreservationError", {
+                expectedAssetCount: Object.keys(prepared.changeTokenAssets).length,
+                actualAssetCount: Object.keys(actualChangeAssets).length,
+            }, "FireblocksCardanoRawSDK");
+        }
+        const bodyFee = Number(prepared.txBody.fee().to_str());
+        if (bodyFee !== prepared.fee ||
+            prepared.accumulatedAda !== options.lovelaceAmount + bodyFee + changeLovelace) {
+            throw new SdkApiError("Transaction value conservation or calculated fee validation failed", 500, "GovernanceValidationError", {
+                inputLovelace: prepared.accumulatedAda,
+                recipientLovelace,
+                changeLovelace,
+                feeLovelace: bodyFee,
+            }, "FireblocksCardanoRawSDK");
+        }
+        return {
+            network: this.network,
+            ...networkEvidence,
+            recipientAllowed: true,
+            amountLovelace: options.lovelaceAmount,
+            feeLovelace: prepared.fee,
+            maxFeeLovelace: requirements.maxFeeLovelace,
+            inputCount: inputs.len(),
+            inputLovelace: prepared.accumulatedAda,
+            outputCount: outputs.len(),
+            recipientLovelace,
+            changeLovelace,
+            assetsPreserved: true,
+        };
+    }
+    /**
+     * Estimates the fee for a native ADA transfer without signing or submitting.
+     *
+     * @param request - AdaFeeEstimationRequest
+     * @returns AdaFeeEstimationResponse with fee breakdown; includes tokenChangeWarning when token UTxOs are consumed
+     */
+    estimateAdaTransactionFee = async (request) => {
+        const { lovelaceAmount, grossAmount = false } = request;
+        let txBody = null;
+        try {
+            this.logger.info(`Estimating ADA transaction fee for ${lovelaceAmount} lovelace (grossAmount: ${grossAmount})`);
+            const prepareResult = await this.prepareAdaTransaction(request);
+            txBody = prepareResult.txBody;
+            const fee = prepareResult.fee;
+            const changeTokenAssets = prepareResult.changeTokenAssets;
+            const feeFormatted = formatWithDecimals(fee, CardanoConstants.ADA_DECIMALS);
+            const recipientReceivesLovelace = grossAmount ? lovelaceAmount - fee : lovelaceAmount;
+            const totalCostLovelace = grossAmount ? lovelaceAmount : lovelaceAmount + fee;
+            const recipientFormatted = formatWithDecimals(recipientReceivesLovelace, CardanoConstants.ADA_DECIMALS);
+            const totalCostFormatted = formatWithDecimals(totalCostLovelace, CardanoConstants.ADA_DECIMALS);
+            const response = {
+                fee: { ada: feeFormatted.value, lovelace: fee.toString() },
+                recipientReceives: {
+                    ada: recipientFormatted.value,
+                    lovelace: recipientReceivesLovelace.toString(),
+                },
+                totalCost: { ada: totalCostFormatted.value, lovelace: totalCostLovelace.toString() },
+            };
+            const numPolicies = countDistinctPolicies(changeTokenAssets);
+            if (numPolicies > 0) {
+                response.tokenChangeWarning = {
+                    policiesAffected: numPolicies,
+                    message: `This transfer will consume UTxOs containing native tokens (${numPolicies} distinct token ${numPolicies === 1 ? "policy" : "policies"}). All tokens will be returned to your address in the change output.`,
+                };
+            }
+            return response;
+        }
+        catch (error) {
+            this.logAndRethrow("AdaFeeEstimation", error);
+        }
+        finally {
+            // Always free WASM objects to prevent memory leaks
+            if (txBody)
+                txBody.free();
+        }
+    };
+    /**
+     * Transfers native ADA (lovelace) to a recipient address or vault.
+     *
+     * UTxO selection prefers ADA-only UTxOs. If multi-asset UTxOs must be spent,
+     * all their tokens are returned to the sender in the change output - no tokens are lost.
+     *
+     * @param options - AdaTransferOpts (lovelaceAmount + recipient)
+     * @returns AdaTransferResult including txHash, fee, and optional tokensPresentedInChange
+     */
+    transferAda = async (options) => {
+        try {
+            const { index = 0, recipientAddress, recipientVaultAccountId, recipientIndex = 0, lovelaceAmount, } = options;
+            this.logger.info(`Initiating ADA transfer: ${lovelaceAmount} lovelace to ${recipientAddress ?? `vault ${recipientVaultAccountId}`}`);
+            if (options.governance && this.chainProvider.kind !== "demeter") {
+                throw new SdkApiError("Strict Fireblocks RAW-signing governance is available only for locally built Demeter ADA transfers", 400, "GovernanceProviderUnsupported", { provider: this.chainProvider.kind }, "FireblocksCardanoRawSDK");
+            }
+            if (this.chainProvider.kind === "demeter") {
+                const networkEvidence = options.governance
+                    ? await this.validateGovernedProviderNetwork()
+                    : undefined;
+                const prepared = await this.prepareAdaTransaction(options);
+                const preflight = options.governance
+                    ? this.validateGovernedAdaPreflight(options, prepared, options.governance, networkEvidence)
+                    : undefined;
+                const signingResult = await this.signTransactionWithEvidence(prepared.txBody, this.assetId, options.governance, prepared.senderAddress);
+                const signedTransaction = signingResult.signedTransaction;
+                try {
+                    const txHash = await submitTransaction(this.chainProvider, signedTransaction);
+                    const demeterSubmissionHashMatchesBody = signingResult.governance
+                        ? txHash.toLowerCase() === signingResult.governance.transactionBodyHash.toLowerCase()
+                        : undefined;
+                    if (signingResult.governance && !demeterSubmissionHashMatchesBody) {
+                        throw new SdkApiError("Demeter returned a transaction hash that does not match the Fireblocks-signed Cardano body", 502, "GovernanceCorrelationError", {
+                            transactionBodyHash: signingResult.governance.transactionBodyHash,
+                            submittedTransactionHash: txHash,
+                        }, "FireblocksCardanoRawSDK");
+                    }
+                    const feeFormatted = formatWithDecimals(prepared.fee, CardanoConstants.ADA_DECIMALS);
+                    return {
+                        txHash,
+                        senderAddress: prepared.senderAddress,
+                        recipientAddress: prepared.resolvedRecipientAddress,
+                        lovelaceAmount,
+                        fee: { lovelace: prepared.fee.toString(), ada: feeFormatted.value },
+                        ...(Object.keys(prepared.changeTokenAssets).length > 0 && {
+                            tokensPresentedInChange: Object.keys(prepared.changeTokenAssets),
+                        }),
+                        ...(signingResult.governance &&
+                            preflight && {
+                            governance: {
+                                ...signingResult.governance,
+                                preflight,
+                                chainProvider: "demeter",
+                                submittedTransactionHash: txHash,
+                                demeterSubmissionHashMatchesBody: true,
+                            },
+                        }),
+                    };
+                }
+                finally {
+                    signedTransaction.free();
+                    prepared.txBody.free();
+                }
+            }
+            const senderAddress = await this.getAddressByIndex(this.assetId, index);
+            const resolvedRecipientAddress = await this.resolveRecipientAddress(recipientAddress, recipientVaultAccountId, recipientIndex);
+            const amount = formatWithDecimals(lovelaceAmount, CardanoConstants.ADA_DECIMALS).value;
+            const { txHash, networkFee } = await this.fireblocksService.createTransfer({
+                assetId: this.assetId,
+                sourceVaultAccountId: this.vaultAccountId,
+                amount,
+                recipientAddress: recipientVaultAccountId ? undefined : resolvedRecipientAddress,
+                recipientVaultAccountId,
+            });
+            // networkFee is returned as a decimal ADA string (e.g. "0.178701") - convert to lovelace
+            // using string splitting to avoid floating-point precision loss
+            const networkFeeLovelace = networkFee ? parseAdaStringToLovelace(networkFee) : undefined;
+            const feeFormatted = networkFeeLovelace
+                ? formatWithDecimals(networkFeeLovelace, CardanoConstants.ADA_DECIMALS)
+                : { value: "unknown" };
+            this.logger.info(`ADA transfer successful: ${txHash} (fee: ${feeFormatted.value} ADA)`);
+            return {
+                txHash,
+                senderAddress,
+                recipientAddress: resolvedRecipientAddress,
+                lovelaceAmount,
+                fee: {
+                    lovelace: networkFeeLovelace?.toString() ?? "unknown",
+                    ada: feeFormatted.value,
+                },
+            };
+        }
+        catch (error) {
+            this.logAndRethrow("AdaTransfer", error);
+        }
+    };
+    // ─── Multi-token transfer ────────────────────────────────────────────────────
+    /**
+     * Shared preparation logic for multi-token transfers.
+     * Validates inputs, selects UTxOs, and builds the transaction body.
+     */
+    async prepareMultiTokenTransaction(params, lock = false) {
+        const { index = 0, recipientAddress, recipientVaultAccountId, recipientIndex = 0, tokens, lovelaceAmount, } = params;
+        if (lovelaceAmount !== undefined && lovelaceAmount < CardanoConstants.MIN_UTXO_BASE_LOVELACE) {
+            throw new SdkApiError(`lovelaceAmount ${lovelaceAmount} is below the Cardano protocol minimum of ${CardanoConstants.MIN_UTXO_BASE_LOVELACE} lovelace (1 ADA)`, 400, "BelowMinimumUtxo", { lovelaceAmount, minimum: CardanoConstants.MIN_UTXO_BASE_LOVELACE }, "FireblocksCardanoRawSDK");
+        }
+        if (!tokens || tokens.length === 0) {
+            throw new SdkApiError("At least one token must be specified in the tokens array", 400, "ValidationError", { tokens }, "FireblocksCardanoRawSDK");
+        }
+        for (const t of tokens) {
+            if (!Number.isInteger(t.amount) || t.amount <= 0) {
+                throw new SdkApiError(`Token amount must be a positive integer (got ${t.amount} for ${t.tokenPolicyId}.${t.tokenName})`, 400, "ValidationError", { token: t }, "FireblocksCardanoRawSDK");
+            }
+        }
+        const resolvedRecipientAddress = await this.resolveRecipientAddress(recipientAddress, recipientVaultAccountId, recipientIndex);
+        const senderAddress = await this.getAddressByIndex(this.assetId, index);
+        const { selectedUtxos, accumulatedAda, changeTokenAssets, minChangeLovelace, release } = await fetchAndSelectUtxosForMultiToken({
+            chainProvider: this.chainProvider,
+            address: senderAddress,
+            tokens,
+            transactionFee: CardanoAmounts.ESTIMATED_MAX_FEE,
+            lovelaceAmount,
+            lock,
+        });
+        // Conservative balance check before building
+        const recipientPolicies = new Set(tokens.map((t) => t.tokenPolicyId)).size;
+        const estimatedMinRecipient = lovelaceAmount ??
+            CardanoConstants.MIN_UTXO_BASE_LOVELACE +
+                recipientPolicies * CardanoAmounts.MIN_UTXO_PER_POLICY_LOVELACE;
+        const minimumRequired = estimatedMinRecipient + CardanoAmounts.ESTIMATED_MAX_FEE + minChangeLovelace;
+        if (accumulatedAda < minimumRequired) {
+            const required = formatWithDecimals(minimumRequired, CardanoConstants.ADA_DECIMALS);
+            const have = formatWithDecimals(accumulatedAda, CardanoConstants.ADA_DECIMALS);
+            throw new SdkApiError(`Insufficient ADA: need ${required.value} ADA (fee + min outputs), have ${have.value} ADA`, 400, "InsufficientBalance", { requiredLovelace: minimumRequired, accumulatedLovelace: accumulatedAda }, "FireblocksCardanoRawSDK");
+        }
+        const numTokenPolicies = countDistinctPolicies(changeTokenAssets);
+        if (numTokenPolicies > recipientPolicies) {
+            this.logger.warn(`Multi-token transfer: selected UTxOs contain additional tokens (${numTokenPolicies} total policies, ${recipientPolicies} requested). Extra tokens returned to sender in change.`);
+        }
+        const txInputs = createTransactionInputs(selectedUtxos);
+        const ttl = await this.fetchCurrentTtl();
+        const recipientAddrMT = Address.from_bech32(resolvedRecipientAddress);
+        const senderAddrMT = Address.from_bech32(senderAddress);
+        const { txBody, fee } = buildMultiTokenTransactionWithCalculatedFee({
+            tokens,
+            recipientAddress: recipientAddrMT,
+            senderAddress: senderAddrMT,
+            selectedUtxos,
+            minRecipientLovelace: lovelaceAmount,
+        }, txInputs, ttl, WITNESS_COUNT_PAYMENT_KEY_ONLY);
+        recipientAddrMT.free();
+        senderAddrMT.free();
+        return {
+            txBody,
+            senderAddress,
+            resolvedRecipientAddress,
+            fee,
+            changeTokenAssets,
+            minRecipientLovelace: estimatedMinRecipient,
+            release,
+        };
+    }
+    /**
+     * Estimates the fee for a multi-token transfer without signing or submitting.
+     *
+     * @param request - MultiTokenFeeEstimationRequest
+     * @returns MultiTokenFeeEstimationResponse with fee, minAdaRequired, totalCost,
+     *          and optional tokenChangeWarning when extra-token UTxOs are consumed
+     */
+    estimateMultiTokenTransactionFee = async (request) => {
+        const { grossAmount = false } = request;
+        let txBody = null;
+        try {
+            this.logger.info(`Estimating multi-token fee for ${request.tokens.length} token type(s)`);
+            const prepareResult = await this.prepareMultiTokenTransaction(request);
+            txBody = prepareResult.txBody;
+            const minRecipientLovelace = prepareResult.minRecipientLovelace;
+            const changeTokenAssets = prepareResult.changeTokenAssets;
+            const fee = txBody.fee();
+            const feeLovelace = parseInt(fee.to_str());
+            fee.free();
+            const feeFormatted = formatWithDecimals(feeLovelace, CardanoConstants.ADA_DECIMALS);
+            const minAdaFormatted = formatWithDecimals(minRecipientLovelace, CardanoConstants.ADA_DECIMALS);
+            const totalCostLovelace = grossAmount
+                ? minRecipientLovelace
+                : minRecipientLovelace + feeLovelace;
+            const totalCostFormatted = formatWithDecimals(totalCostLovelace, CardanoConstants.ADA_DECIMALS);
+            const response = {
+                fee: { ada: feeFormatted.value, lovelace: feeLovelace.toString() },
+                minAdaRequired: { ada: minAdaFormatted.value, lovelace: minRecipientLovelace.toString() },
+                totalCost: { ada: totalCostFormatted.value, lovelace: totalCostLovelace.toString() },
+            };
+            // check if change has policies we didn't intend to transfer
+            const intendedPolicies = [...new Set(request.tokens.map((t) => t.tokenPolicyId))];
+            const extra = getExtraPolicies(changeTokenAssets, intendedPolicies);
+            if (extra.length > 0) {
+                response.tokenChangeWarning = {
+                    policiesAffected: extra.length,
+                    message: `Selected UTxOs carry additional tokens not included in this transfer. They will be returned to your address in the change output.`,
+                };
+            }
+            return response;
+        }
+        catch (error) {
+            this.logAndRethrow("MultiTokenFeeEstimation", error);
+        }
+        finally {
+            // Always free WASM objects to prevent memory leaks
+            if (txBody)
+                txBody.free();
+        }
+    };
+    /**
+     * Transfers multiple CNTs to a recipient in a single Cardano transaction.
+     *
+     * All specified tokens are bundled into one recipient output. Any tokens present
+     * in consumed UTxOs but not listed in `tokens` are returned to the sender in the
+     * change output - no tokens are lost.
+     *
+     * @param options - MultiTokenTransferOpts
+     * @returns MultiTokenTransferResult with txHash, fee, and optional tokensPresentedInChange
+     */
+    transferMultipleTokens = async (options) => {
+        // Declared before try so finally { release() } is always safe to call,
+        // even if prepareMultiTokenTransaction throws before producing the real fn.
+        let release = () => { };
+        try {
+            this.logger.info(`Initiating multi-token transfer: ${options.tokens.length} token type(s) to ${options.recipientAddress ?? `vault ${options.recipientVaultAccountId}`}`);
+            const { txBody, senderAddress, resolvedRecipientAddress, fee, changeTokenAssets, release: _release, } = await this.prepareMultiTokenTransaction(options, true);
+            release = _release; // promote to outer scope so finally can call it
+            const feeFormatted = formatWithDecimals(fee, CardanoConstants.ADA_DECIMALS);
+            this.logger.info(`Multi-token transaction prepared, recipient: ${resolvedRecipientAddress}, fee: ${feeFormatted.value} ADA`);
+            const signedTransaction = await this.signTransaction(txBody);
+            const txHash = await submitTransaction(this.chainProvider, signedTransaction);
+            this.logger.info(`Multi-token transfer successful: ${txHash} (fee: ${feeFormatted.value} ADA)`);
+            const result = {
+                txHash,
+                senderAddress,
+                recipientAddress: resolvedRecipientAddress,
+                tokens: options.tokens,
+                fee: { lovelace: fee.toString(), ada: feeFormatted.value },
+            };
+            const sentPolicies = new Set(options.tokens.map((t) => t.tokenPolicyId));
+            const extraPolicies = [
+                ...new Set(Object.keys(changeTokenAssets).map((u) => u.split(".")[0])),
+            ].filter((p) => !sentPolicies.has(p));
+            if (extraPolicies.length > 0) {
+                result.tokensPresentedInChange = extraPolicies;
+                this.logger.warn(`Multi-token transfer consumed UTxOs with additional tokens. Extra policies in change: ${extraPolicies.join(", ")}`);
+            }
+            return result;
+        }
+        catch (error) {
+            this.logAndRethrow("MultiTokenTransfer", error);
+        }
+        finally {
+            release();
+        }
+    };
+    // ─── UTxO consolidation ───────────────────────────────────────────────────────
+    // default batch size leaves headroom for witness overhead
+    static DEFAULT_BATCH_SIZE = CardanoConstants.MAX_TX_INPUTS - 10;
+    static DEFAULT_MAX_BATCHES = 20;
+    /**
+     * Consolidates UTxOs at the given address index.
+     *
+     * By default consolidates all UTxOs in a single transaction. For dust-attacked
+     * addresses with >100 UTxOs, use `batched: true` to process in multiple txs.
+     *
+     * @param opts - ConsolidateUtxosOpts
+     * @returns ConsolidateUtxosResult with txHash, fee, UTxO count merged, and token policies
+     * @throws SdkApiError (400) if the address has fewer UTxOs than minUtxoCount
+     */
+    consolidateUtxos = async (opts = {}) => {
+        const { index = 0, minUtxoCount = 2, batched = false, batchSize = FireblocksCardanoRawSDK.DEFAULT_BATCH_SIZE, maxBatches = FireblocksCardanoRawSDK.DEFAULT_MAX_BATCHES, } = opts;
+        const senderAddress = await this.getAddressByIndex(this.assetId, index);
+        this.logger.info(`Consolidating UTxOs at address index ${index}: ${senderAddress}`);
+        const rawUtxos = await fetchUtxos(this.chainProvider, senderAddress);
+        const initialUtxos = rawUtxos.filter((u) => !utxoLocks.isLocked(u.transaction_id, u.output_index));
+        if (initialUtxos.length > CardanoConstants.MAX_TX_INPUTS) {
+            this.logger.warn(`consolidateUtxos: capping ${initialUtxos.length} UTxOs to MAX_TX_INPUTS=${CardanoConstants.MAX_TX_INPUTS}`);
+            initialUtxos.splice(CardanoConstants.MAX_TX_INPUTS);
+        }
+        if (initialUtxos.length < minUtxoCount) {
+            throw new SdkApiError(`Address has ${initialUtxos.length} UTxO(s), below minimum ${minUtxoCount} for consolidation`, 400, "InsufficientUtxos", { utxoCount: initialUtxos.length, minUtxoCount, address: senderAddress }, "FireblocksCardanoRawSDK");
+        }
+        // single-tx path (legacy behavior)
+        if (!batched) {
+            return this.consolidateSingleBatch(senderAddress, initialUtxos);
+        }
+        // batched consolidation for dust-attacked addresses
+        return this.consolidateBatched(senderAddress, batchSize, maxBatches, minUtxoCount);
+    };
+    /** Single-transaction consolidation (original behavior) */
+    async consolidateSingleBatch(senderAddress, utxos) {
+        try {
+            const txInputs = createTransactionInputs(utxos);
+            const ttl = await this.fetchCurrentTtl();
+            const senderAddrConsolidate = Address.from_bech32(senderAddress);
+            const { outputs, fee, txBody } = buildConsolidationTransactionWithCalculatedFee({ senderAddress: senderAddrConsolidate, selectedUtxos: utxos }, txInputs, ttl, WITNESS_COUNT_PAYMENT_KEY_ONLY);
+            senderAddrConsolidate.free();
+            const feeFormatted = formatWithDecimals(fee, CardanoConstants.ADA_DECIMALS);
+            this.logger.info(`Consolidation prepared: ${utxos.length} UTxOs → 1, fee: ${feeFormatted.value} ADA`);
+            const signedTransaction = await this.signTransaction(txBody);
+            const txHash = await submitTransaction(this.chainProvider, signedTransaction);
+            this.logger.info(`UTxO consolidation successful: ${txHash}`);
+            const { lovelace: outputLovelace, tokenPolicies } = this.extractOutputMetadata(outputs[0]);
+            return {
+                txHash,
+                address: senderAddress,
+                utxosCombined: utxos.length,
+                lovelace: outputLovelace,
+                fee: { lovelace: fee.toString(), ada: feeFormatted.value },
+                tokenPolicies,
+            };
+        }
+        catch (error) {
+            this.logAndRethrow("Consolidation", error);
+        }
+    }
+    /** Batched consolidation for dust-attacked addresses */
+    async consolidateBatched(senderAddress, batchSize, maxBatches, minUtxoCount) {
+        const batches = [];
+        let totalUtxosCombined = 0;
+        let totalFeeLovelace = 0;
+        let lastTxHash = "";
+        let partialError;
+        for (let batchNum = 0; batchNum < maxBatches; batchNum++) {
+            // re-fetch UTxOs after each batch to get fresh state
+            const utxos = await fetchUtxos(this.chainProvider, senderAddress);
+            // stop if we've consolidated enough (only 1 UTxO left or below threshold)
+            if (utxos.length < minUtxoCount) {
+                this.logger.info(`Batched consolidation complete after ${batchNum} batch(es)`);
+                break;
+            }
+            // take up to batchSize UTxOs for this batch
+            const batchUtxos = utxos.slice(0, batchSize);
+            try {
+                const txInputs = createTransactionInputs(batchUtxos);
+                const ttl = await this.fetchCurrentTtl();
+                const senderAddrObj = Address.from_bech32(senderAddress);
+                const { fee, txBody } = buildConsolidationTransactionWithCalculatedFee({ senderAddress: senderAddrObj, selectedUtxos: batchUtxos }, txInputs, ttl, WITNESS_COUNT_PAYMENT_KEY_ONLY);
+                senderAddrObj.free();
+                const feeFormatted = formatWithDecimals(fee, CardanoConstants.ADA_DECIMALS);
+                this.logger.info(`Batch ${batchNum + 1}: consolidating ${batchUtxos.length} UTxOs, fee: ${feeFormatted.value} ADA`);
+                const signedTransaction = await this.signTransaction(txBody);
+                const txHash = await submitTransaction(this.chainProvider, signedTransaction);
+                batches.push({
+                    txHash,
+                    utxosCombined: batchUtxos.length,
+                    fee: { lovelace: fee.toString(), ada: feeFormatted.value },
+                });
+                totalUtxosCombined += batchUtxos.length;
+                totalFeeLovelace += fee;
+                lastTxHash = txHash;
+                this.logger.info(`Batch ${batchNum + 1} successful: ${txHash}`);
+                // brief pause between batches to let chain register the tx
+                if (batchNum < maxBatches - 1) {
+                    await new Promise((r) => setTimeout(r, 1000));
+                }
+            }
+            catch (error) {
+                partialError =
+                    error instanceof Error ? error.message : "Unknown error during batch consolidation";
+                this.logger.error(`Batch ${batchNum + 1} failed: ${partialError}`);
+                break;
+            }
+        }
+        if (batches.length === 0) {
+            throw new SdkApiError(partialError ?? "Batched consolidation failed on first batch", 500, "ConsolidationFailed", { address: senderAddress }, "FireblocksCardanoRawSDK");
+        }
+        // get final state for output metadata
+        const finalUtxos = await fetchUtxos(this.chainProvider, senderAddress);
+        const tokenPolicies = this.extractTokenPoliciesFromUtxos(finalUtxos);
+        const totalLovelace = finalUtxos.reduce((sum, u) => sum + u.value.lovelace, 0);
+        const totalFeeFormatted = formatWithDecimals(totalFeeLovelace, CardanoConstants.ADA_DECIMALS);
+        const result = {
+            txHash: lastTxHash,
+            address: senderAddress,
+            utxosCombined: totalUtxosCombined,
+            lovelace: totalLovelace.toString(),
+            fee: batches[batches.length - 1].fee,
+            tokenPolicies,
+            batches,
+            totalFee: { lovelace: totalFeeLovelace.toString(), ada: totalFeeFormatted.value },
+        };
+        if (partialError) {
+            result.partialError = partialError;
+        }
+        return result;
+    }
+    /** Extract lovelace and token policies from a transaction output */
+    extractOutputMetadata(output) {
+        const outputAmount = output.amount();
+        const coinBN = outputAmount.coin();
+        const lovelace = coinBN.to_str();
+        coinBN.free();
+        const multiAsset = outputAmount.multiasset();
+        outputAmount.free();
+        const tokenPolicies = [];
+        if (multiAsset) {
+            const keys = multiAsset.keys();
+            for (let i = 0; i < keys.len(); i++) {
+                const key = keys.get(i);
+                tokenPolicies.push(Buffer.from(key.to_bytes()).toString("hex"));
+                key.free();
+            }
+            keys.free();
+            multiAsset.free();
+        }
+        return { lovelace, tokenPolicies };
+    }
+    /** Extract unique token policy IDs from a list of UTxOs */
+    extractTokenPoliciesFromUtxos(utxos) {
+        const policies = new Set();
+        for (const utxo of utxos) {
+            if (utxo.value.assets) {
+                // asset keys are "policyId.assetName" - extract the policy part
+                for (const assetUnit of Object.keys(utxo.value.assets)) {
+                    const policyId = assetUnit.split(".")[0];
+                    if (policyId)
+                        policies.add(policyId);
+                }
+            }
+        }
+        return [...policies];
+    }
+    /**
+     * Retrieves the wallet addresses associated with a specific Fireblocks vault account.
+     *
+     * @returns A promise that resolves to an array of VaultWalletAddress objects.
+     * @throws Error if the retrieval fails.
+     */
+    getVaultAccountAddresses = async () => {
+        return await this.fireblocksService.getVaultAccountAddresses(this.vaultAccountId, this.assetId);
+    };
+    /**
+     * Gets the JWKS endpoint URL based on Fireblocks environment
+     * Defaults to US production if not specified
+     */
+    getJwksEndpoint(environment = "US") {
+        return FireblocksWebhookConstants.JWKS_ENDPOINTS[environment];
+    }
+    /**
+     * Verifies webhook signature using JWKS (JSON Web Key Set) method
+     * This is the new recommended method for webhook verification
+     *
+     * @param rawBody - The raw request body as Buffer
+     * @param jwsSignature - The value from Fireblocks-Webhook-Signature header
+     * @param environment - Fireblocks environment (US, EU, EU2, or SANDBOX)
+     * @returns true if signature is valid, false otherwise
+     */
+    async verifyWebhookJWKS(rawBody, jwsSignature, environment = "US") {
+        try {
+            const jwksEndpoint = this.getJwksEndpoint(environment);
+            // Get or create JWKS instance (cached per endpoint)
+            let jwks = this.jwksCache.get(jwksEndpoint);
+            if (!jwks) {
+                jwks = createRemoteJWKSet(new URL(jwksEndpoint));
+                this.jwksCache.set(jwksEndpoint, jwks);
+                this.logger.debug(`Created JWKS client for ${jwksEndpoint}`);
+            }
+            // Detached JWS format: "header..signature" (no payload in the middle)
+            const [header, , sig] = jwsSignature.split(".");
+            if (!header || !sig) {
+                this.logger.warn("Invalid JWS signature format");
+                return false;
+            }
+            // Reconstruct full JWS with payload
+            const payload = Buffer.from(rawBody).toString("base64url");
+            const fullJws = `${header}.${payload}.${sig}`;
+            // jose extracts kid from header and fetches correct key from JWKS
+            await compactVerify(fullJws, jwks);
+            this.logger.info("JWKS webhook signature verification successful");
+            return true;
+        }
+        catch (error) {
+            this.logger.error("JWKS verification failed:", error instanceof Error ? error.message : String(error));
+            return false;
+        }
+    }
+    /**
+     * Verifies webhook signature using legacy RSA-SHA512 method
+     * This method is being phased out in favor of JWKS
+     *
+     * @param rawBody - The raw request body as Buffer
+     * @param signature - The value from Fireblocks-Signature header (base64 encoded)
+     * @param environment - Fireblocks environment to determine which public key to use
+     * @returns true if signature is valid, false otherwise
+     */
+    verifyWebhookLegacy(rawBody, signature, environment = "US") {
+        try {
+            // Use US key for SANDBOX and US, EU key for EU and EU2
+            const publicKey = environment === "EU" || environment === "EU2"
+                ? FireblocksWebhookConstants.LEGACY_PUBLIC_KEYS.EU
+                : environment === "SANDBOX"
+                    ? FireblocksWebhookConstants.LEGACY_PUBLIC_KEYS.SANDBOX
+                    : FireblocksWebhookConstants.LEGACY_PUBLIC_KEYS.US;
+            const verifier = crypto.createVerify("RSA-SHA512");
+            verifier.update(rawBody);
+            const isValid = verifier.verify(publicKey, signature, "base64");
+            if (isValid) {
+                this.logger.info("Legacy webhook signature verification successful");
+            }
+            else {
+                this.logger.warn("Legacy webhook signature verification failed");
+            }
+            return isValid;
+        }
+        catch (error) {
+            this.logger.error("Legacy signature verification failed:", error instanceof Error ? error.message : String(error));
+            return false;
+        }
+    }
+    /**
+     * Verifies Fireblocks webhook authenticity using both JWKS and legacy methods
+     *
+     * @param rawBody - The raw request body as Buffer (before JSON parsing)
+     * @param headers - Request headers object (case-insensitive)
+     * @param environment - Fireblocks environment (US, EU, EU2, or SANDBOX). Defaults to US.
+     * @returns true if webhook is authentic, false otherwise
+     * @throws Error if verification fails critically
+     */
+    async verifyWebhook(rawBody, headers, environment = "US") {
+        // Normalize header keys to lowercase for case-insensitive lookup
+        const normalizedHeaders = {};
+        for (const [key, value] of Object.entries(headers)) {
+            normalizedHeaders[key.toLowerCase()] = value;
+        }
+        const jwksSignature = normalizedHeaders[FireblocksWebhookConstants.HEADERS.JWKS_SIGNATURE.toLowerCase()];
+        const legacySignature = normalizedHeaders[FireblocksWebhookConstants.HEADERS.LEGACY_SIGNATURE.toLowerCase()];
+        // Try JWKS verification first (preferred method)
+        if (jwksSignature) {
+            const jwksValid = await this.verifyWebhookJWKS(rawBody, jwksSignature, environment);
+            if (jwksValid) {
+                return true;
+            }
+            this.logger.warn("JWKS verification failed, trying legacy method");
+        }
+        // Fall back to legacy verification
+        if (legacySignature) {
+            const legacyValid = this.verifyWebhookLegacy(rawBody, legacySignature, environment);
+            if (legacyValid) {
+                return true;
+            }
+        }
+        // No valid signature found
+        if (!jwksSignature && !legacySignature) {
+            this.logger.error("No webhook signature headers found");
+        }
+        else {
+            this.logger.error("Webhook signature verification failed with all methods");
+        }
+        return false;
+    }
+    /**
+     * Enriches a webhook payload with detailed Cardano transaction data
+     *
+     * Note: This method only handles enrichment. Webhook signature verification
+     * should be performed separately using the verifyWebhook() method before calling this.
+     *
+     * @param payload - The webhook payload to enrich
+     * @returns The enriched webhook payload with cardanoTokensData if applicable
+     */
+    enrichWebhookPayload = async (payload) => {
+        if (payload.eventType !== WebhookEventTypes.TRANSACTION_CREATED &&
+            payload.eventType !== WebhookEventTypes.TRANSACTION_STATUS_UPDATED &&
+            payload.eventType !== WebhookEventTypes.TRANSACTION_APPROVAL_STATUS_UPDATED &&
+            payload.eventType !== WebhookEventTypes.TRANSACTION_NETWORK_RECORDS_PROCESSING_COMPLETED) {
+            return payload;
+        }
+        const transactionAsset = payload.data.assetId;
+        if (transactionAsset !== SupportedAssets.ADA && transactionAsset !== SupportedAssets.ADA_TEST) {
+            this.logger.info(`Webhook received for non-ADA asset: ${transactionAsset}, skipping enrichment.`);
+            return payload;
+        }
+        const txHash = payload.data.txHash;
+        if (!txHash) {
+            this.logger.warn("Webhook payload missing txHash, cannot enrich.");
+            return payload;
+        }
+        this.logger.info(`Enriching webhook payload for ADA transaction: ${txHash}`);
+        const detailedTx = await this.chainProvider.getTransactionDetails(txHash);
+        if (!detailedTx) {
+            this.logger.warn(`Transaction not found: ${txHash}`);
+            return payload;
+        }
+        const filteredInputs = detailedTx.data.inputs.filter((input) => input.value.assets);
+        if (filteredInputs.length === 0) {
+            this.logger.info(`No asset inputs found in transaction: ${txHash}`);
+            return payload;
+        }
+        const enrichedPayload = {
+            ...payload,
+            data: {
+                ...payload.data,
+                cardanoTokensData: detailedTx.data,
+            },
+        };
+        this.logger.info(`Webhook payload enriched for transaction: ${txHash}`);
+        return enrichedPayload;
+    };
+    /**
+     * Get public key for a vault account address with caching
+     */
+    getPublicKey = async (change = 0, addressIndex = 0) => {
+        // Create cache key from all parameters
+        const cacheKey = `${this.assetId}-${change}-${addressIndex}`;
+        const cachedPublicKey = this.publicKeys.get(cacheKey);
+        if (cachedPublicKey) {
+            this.logger.debug(`Using cached public key for ${cacheKey}`);
+            return cachedPublicKey;
+        }
+        // Fetch from Fireblocks if not cached
+        const publicKey = await this.fireblocksService.getAssetPublicKey(this.vaultAccountId, this.assetId, change, addressIndex);
+        // Cache the public key
+        this.publicKeys.set(cacheKey, publicKey);
+        this.logger.debug(`Cached public key for ${cacheKey}`);
+        return publicKey;
+    };
+    /**
+     * Helper to batch fetch and enrich asset metadata
+     * @param assetIds - Array of asset IDs (format: "policyId.assetName")
+     * @param amounts - Map of assetId to amount (for formatting)
+     * @returns Map of assetId to enriched metadata
+     */
+    async enrichAssetMetadata(assetIds, amounts) {
+        const metadataMap = new Map();
+        // Fetch all metadata in parallel
+        const metadataPromises = assetIds.map(async (assetId) => {
+            try {
+                const [policyId, assetName] = assetId.split(".");
+                if (!policyId || !assetName) {
+                    this.logger.warn(`Invalid assetId format: ${assetId}`);
+                    return null;
+                }
+                const assetInfo = await this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).getAssetInfo(policyId, assetName);
+                const amount = amounts.get(assetId) || "0";
+                const decimals = assetInfo.data.metadata?.decimals || 0;
+                const amountNumber = Number(amount);
+                const formatted = formatWithDecimals(amountNumber, decimals);
+                const metadata = {
+                    name: assetInfo.data.metadata?.name || null,
+                    ticker: assetInfo.data.metadata?.ticker || null,
+                    decimals,
+                    formattedAmount: formatted.value,
+                    description: assetInfo.data.metadata?.description || null,
+                    fingerprint: assetInfo.data.fingerprint || null,
+                };
+                return { assetId, metadata };
+            }
+            catch (error) {
+                this.logger.warn(`Failed to fetch metadata for ${assetId}: ${error instanceof Error ? error.message : String(error)}`);
+                return null;
+            }
+        });
+        const results = await Promise.all(metadataPromises);
+        // Build metadata map
+        for (const result of results) {
+            if (result) {
+                metadataMap.set(result.assetId, result.metadata);
+            }
+        }
+        this.logger.debug(`Enriched metadata for ${metadataMap.size}/${assetIds.length} assets`);
+        return metadataMap;
+    }
+    /**
+     * Helper to transform Iagon balance responses to include metadata
+     * @param response - Raw Iagon API response
+     * @returns Enriched response with metadata
+     */
+    async enrichIagonResponse(response) {
+        if (!response.success || !response.data) {
+            return response;
+        }
+        const { data } = response;
+        const assetIds = [];
+        const amounts = new Map();
+        // Check if it's a GroupedBalanceResponse or BalanceResponse
+        const isGrouped = Object.values(data.assets || {}).some((val) => typeof val === "object");
+        if (isGrouped) {
+            // GroupedBalanceResponse
+            for (const [policyId, tokens] of Object.entries(data.assets || {})) {
+                for (const [assetName, amount] of Object.entries(tokens)) {
+                    const assetId = `${policyId}.${assetName}`;
+                    assetIds.push(assetId);
+                    amounts.set(assetId, String(amount));
+                }
+            }
+        }
+        else {
+            // BalanceResponse
+            for (const [assetId, amount] of Object.entries(data.assets || {})) {
+                assetIds.push(assetId);
+                amounts.set(assetId, String(amount));
+            }
+        }
+        // Fetch metadata for all assets
+        const metadataMap = await this.enrichAssetMetadata(assetIds, amounts);
+        // Build enriched response (values include optional metadata, so we use a looser intermediate type)
+        const enrichedAssets = {};
+        if (isGrouped) {
+            // GroupedBalanceResponse structure
+            for (const [policyId, tokens] of Object.entries(data.assets || {})) {
+                enrichedAssets[policyId] = {};
+                for (const [assetName, amount] of Object.entries(tokens)) {
+                    const assetId = `${policyId}.${assetName}`;
+                    const metadata = metadataMap.get(assetId);
+                    enrichedAssets[policyId][assetName] = {
+                        amount,
+                        ...(metadata && { metadata }),
+                    };
+                }
+            }
+        }
+        else {
+            // BalanceResponse structure
+            for (const [assetId, amount] of Object.entries(data.assets || {})) {
+                const metadata = metadataMap.get(assetId);
+                enrichedAssets[assetId] = {
+                    amount,
+                    ...(metadata && { metadata }),
+                };
+            }
+        }
+        // Cast is intentional: enriched assets are a superset of the base types (extra metadata fields)
+        return {
+            success: true,
+            data: {
+                lovelace: data.lovelace,
+                assets: enrichedAssets,
+            },
+        };
+    }
+    /**
+     * Helper to aggregate vault balances based on groupBy option
+     */
+    async aggregateVaultBalance(results, groupBy, includeMetadata) {
+        if (groupBy === GroupByOptions.ADDRESS) {
+            return this.aggregateByAddress(results, includeMetadata);
+        }
+        else if (groupBy === GroupByOptions.POLICY) {
+            return this.aggregateByPolicy(results, includeMetadata);
+        }
+        else {
+            return this.aggregateByToken(results, includeMetadata);
+        }
+    }
+    /**
+     * Aggregate balances by token (default view)
+     */
+    async aggregateByToken(results, includeMetadata) {
+        const tokenMap = new Map();
+        let totalLovelace = BigInt(0);
+        for (const result of results) {
+            if (!result.balance || !result.balance.success)
+                continue;
+            const bal = result.balance.data;
+            if (!bal)
+                continue;
+            // Add ADA
+            totalLovelace += BigInt(bal.lovelace || 0);
+            // Add tokens
+            if (bal.assets) {
+                for (const [assetId, amount] of Object.entries(bal.assets)) {
+                    const current = tokenMap.get(assetId) || BigInt(0);
+                    tokenMap.set(assetId, current + BigInt(amount));
+                }
+            }
+        }
+        const tokens = Array.from(tokenMap.entries()).map(([assetId, amount]) => ({
+            assetId,
+            amount: amount.toString(),
+            tokenName: decodeAssetName(assetId),
+        }));
+        // Enrich with metadata if requested
+        if (includeMetadata && tokenMap.size > 0) {
+            const assetIds = Array.from(tokenMap.keys());
+            const amounts = new Map(Array.from(tokenMap.entries()).map(([id, amt]) => [id, amt.toString()]));
+            const metadataMap = await this.enrichAssetMetadata(assetIds, amounts);
+            // Attach metadata to tokens
+            for (const token of tokens) {
+                const metadata = metadataMap.get(token.assetId);
+                if (metadata) {
+                    token.metadata = metadata;
+                }
+            }
+        }
+        return {
+            balances: [{ assetId: "ADA", amount: totalLovelace.toString(), tokenName: "ADA" }, ...tokens],
+        };
+    }
+    /**
+     * Aggregate balances by address
+     */
+    async aggregateByAddress(results, includeMetadata) {
+        const addresses = [];
+        let totalLovelace = BigInt(0);
+        const totalTokenMap = new Map();
+        for (const result of results) {
+            if (!result.balance || !result.balance.success) {
+                addresses.push({
+                    address: result.address,
+                    index: result.index,
+                    lovelace: "0",
+                    tokens: [],
+                });
+                continue;
+            }
+            const bal = result.balance.data;
+            if (!bal) {
+                addresses.push({
+                    address: result.address,
+                    index: result.index,
+                    lovelace: "0",
+                    tokens: [],
+                });
+                continue;
+            }
+            const addressAda = BigInt(bal.lovelace || 0);
+            const addressTokens = new Map();
+            if (bal.assets) {
+                for (const [assetId, amount] of Object.entries(bal.assets)) {
+                    const current = addressTokens.get(assetId) || BigInt(0);
+                    addressTokens.set(assetId, current + BigInt(amount));
+                }
+            }
+            totalLovelace += addressAda;
+            const tokens = Array.from(addressTokens.entries()).map(([assetId, amount]) => {
+                const current = totalTokenMap.get(assetId) || BigInt(0);
+                totalTokenMap.set(assetId, current + amount);
+                return { assetId, amount: amount.toString(), tokenName: decodeAssetName(assetId) };
+            });
+            addresses.push({
+                address: result.address,
+                index: result.index,
+                lovelace: addressAda.toString(),
+                tokens,
+            });
+        }
+        const totalTokens = Array.from(totalTokenMap.entries()).map(([assetId, amount]) => ({
+            assetId,
+            amount: amount.toString(),
+            tokenName: decodeAssetName(assetId),
+        }));
+        // Enrich with metadata if requested
+        let metadataMap = null;
+        if (includeMetadata && totalTokenMap.size > 0) {
+            const assetIds = Array.from(totalTokenMap.keys());
+            const amounts = new Map(Array.from(totalTokenMap.entries()).map(([id, amt]) => [id, amt.toString()]));
+            metadataMap = await this.enrichAssetMetadata(assetIds, amounts);
+        }
+        // Attach metadata to tokens if available
+        if (metadataMap) {
+            // Attach to per-address tokens
+            for (const addr of addresses) {
+                for (const token of addr.tokens) {
+                    const metadata = metadataMap.get(token.assetId);
+                    if (metadata) {
+                        Object.assign(token, { metadata });
+                    }
+                }
+            }
+            // Attach to total tokens
+            for (const token of totalTokens) {
+                const metadata = metadataMap.get(token.assetId);
+                if (metadata) {
+                    Object.assign(token, { metadata });
+                }
+            }
+        }
+        return {
+            addresses,
+            totals: {
+                lovelace: totalLovelace.toString(),
+                tokens: totalTokens,
+            },
+        };
+    }
+    /**
+     * Aggregate balances by policy
+     */
+    async aggregateByPolicy(results, includeMetadata) {
+        const policyMap = new Map();
+        let totalLovelace = BigInt(0);
+        for (const result of results) {
+            if (!result.balance || !result.balance.success)
+                continue;
+            const balance = result.balance.data;
+            if (!balance)
+                continue;
+            totalLovelace += BigInt(balance.lovelace || 0);
+            if (balance.assets && typeof balance.assets === "object") {
+                for (const [policyId, tokens] of Object.entries(balance.assets)) {
+                    if (typeof tokens === "object" && tokens !== null) {
+                        let policyTokens = policyMap.get(policyId);
+                        if (!policyTokens) {
+                            policyTokens = new Map();
+                            policyMap.set(policyId, policyTokens);
+                        }
+                        for (const [tokenName, amount] of Object.entries(tokens)) {
+                            // Keep hex token name as key
+                            const current = policyTokens.get(tokenName) || BigInt(0);
+                            policyTokens.set(tokenName, current + BigInt(amount));
+                        }
+                    }
+                }
+            }
+        }
+        const balances = Array.from(policyMap.entries()).map(([policyId, tokens]) => {
+            const tokenObj = {};
+            for (const [hexTokenName, amount] of tokens.entries()) {
+                tokenObj[hexTokenName] = {
+                    tokenName: decodeAssetName(`${policyId}.${hexTokenName}`),
+                    amount: amount.toString(),
+                };
+            }
+            return { policyId, tokens: tokenObj };
+        });
+        // Enrich with metadata if requested
+        if (includeMetadata && policyMap.size > 0) {
+            // Build list of all assetIds
+            const assetIds = [];
+            const amounts = new Map();
+            for (const [policyId, tokens] of policyMap.entries()) {
+                for (const [hexTokenName, amount] of tokens.entries()) {
+                    const assetId = `${policyId}.${hexTokenName}`;
+                    assetIds.push(assetId);
+                    amounts.set(assetId, amount.toString());
+                }
+            }
+            const metadataMap = await this.enrichAssetMetadata(assetIds, amounts);
+            // Attach metadata to tokens in balances
+            for (const balance of balances) {
+                for (const [hexTokenName, tokenData] of Object.entries(balance.tokens)) {
+                    const assetId = `${balance.policyId}.${hexTokenName}`;
+                    const metadata = metadataMap.get(assetId);
+                    if (metadata) {
+                        Object.assign(tokenData, { metadata });
+                    }
+                }
+            }
+        }
+        return {
+            balances,
+            totalLovelace: totalLovelace.toString(),
+        };
+    }
+    /**
+     * Get direct access to the Fireblocks service
+     * @internal - For advanced usage only
+     */
+    getFireblocksService() {
+        return this.fireblocksService;
+    }
+    /**
+     * Get direct access to the Iagon API service
+     * @internal - For advanced usage only
+     */
+    getIagonApiService() {
+        return this.requireIagonProvider(ChainProviderCapability.IAGON_COMPATIBILITY);
+    }
+    /**
+     * Get direct access to the Staking service
+     * @internal - For advanced usage only
+     */
+    getStakingService() {
+        return this.requireStakingService();
+    }
+    // ======================
+    // Staking Operations
+    // ======================
+    /**
+     * Register staking credential for a vault account
+     *
+     * This is the first step to enable staking. It registers the staking key on-chain
+     * and requires a deposit of 2 ADA (DEPOSIT_AMOUNT) which will be returned upon deregistration.
+     *
+     * @param options - Registration options
+     * @returns Transaction result with hash and status
+     * @throws Error if registration fails
+     *
+     * @example
+     * ```typescript
+     * const result = await sdk.registerStakingCredential({
+     *   vaultAccountId: "0",
+     *   depositAmount: 2000000, // 2 ADA
+     *   fee: 300000 // 0.3 ADA
+     * });
+     * console.log(`Registration TX: ${result.txHash}`);
+     * ```
+     */
+    registerStakingCredential = async (options) => {
+        this.logger.info(`Registering staking credential for vault account ${options.vaultAccountId}`);
+        return await this.requireStakingService().registerStakingCredential(options);
+    };
+    /**
+     * Delegate ADA to a stake pool
+     *
+     * Delegates the staking credential to a specific stake pool. The staking credential
+     * must be registered first using registerStakingCredential().
+     *
+     * @param options - Delegation options including pool ID
+     * @returns Transaction result with hash and status
+     * @throws Error if delegation fails
+     *
+     * @example
+     * ```typescript
+     * const result = await sdk.delegateToPool({
+     *   vaultAccountId: "0",
+     *   poolId: "pool1pu5jlj4q9w9jlxeu370a3c9myx47md5j5m2str0naunn2q3lkdy", // Pool ID in bech32 or hex
+     *   fee: 300000 // 0.3 ADA
+     * });
+     * console.log(`Delegation TX: ${result.txHash}`);
+     * ```
+     */
+    delegateToPool = async (options) => {
+        this.logger.info(`Delegating to pool ${options.poolId} for vault account ${options.vaultAccountId}`);
+        const { vaultAccountId, poolId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
+        return await this.requireStakingService().delegateToPool({ vaultAccountId, poolId, fee });
+    };
+    /**
+     * Deregister staking credential
+     *
+     * Deregisters the staking credential and withdraws all available rewards.
+     * Returns the 2 ADA deposit that was paid during registration.
+     *
+     * @param options - Deregistration options
+     * @returns Transaction result with hash and status
+     * @throws Error if deregistration fails
+     *
+     * @example
+     * ```typescript
+     * const result = await sdk.deregisterStakingCredential({
+     *   vaultAccountId: "0",
+     *   fee: 300000 // 0.3 ADA
+     * });
+     * console.log(`Deregistration TX: ${result.txHash}`);
+     * ```
+     */
+    deregisterStakingCredential = async (options) => {
+        this.logger.info(`Deregistering staking credential for vault account ${options.vaultAccountId}`);
+        const { vaultAccountId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
+        return await this.requireStakingService().deregisterStakingCredential({ vaultAccountId, fee });
+    };
+    /**
+     * Withdraw staking rewards
+     *
+     * Withdraws accumulated staking rewards without deregistering the staking credential.
+     * You can continue to stake after withdrawing rewards.
+     *
+     * @param options - Withdrawal options with optional limit
+     * @returns Transaction result with hash and status
+     * @throws Error if withdrawal fails
+     *
+     * @example
+     * ```typescript
+     * // Withdraw all available rewards
+     * const result = await sdk.withdrawRewards({
+     *   vaultAccountId: "0",
+     *   fee: 300000 // 0.3 ADA
+     * });
+     *
+     * // Withdraw up to 5 ADA
+     * const result = await sdk.withdrawRewards({
+     *   vaultAccountId: "0",
+     *   limit: 5000000, // 5 ADA in Lovelace
+     *   fee: 300000
+     * });
+     * console.log(`Withdrawal TX: ${result.txHash}`);
+     * ```
+     */
+    withdrawRewards = async (options) => {
+        this.logger.info(`Withdrawing rewards for vault account ${options.vaultAccountId}`);
+        const { vaultAccountId, limit, fee = CardanoAmounts.STAKING_TX_FEE } = options;
+        return await this.requireStakingService().withdrawRewards({ vaultAccountId, limit, fee });
+    };
+    getStakeAccountInfo = async (vaultAccountId) => {
+        this.logger.info(`Getting staking account info for vault account ${vaultAccountId}`);
+        const stakeAddress = await this.requireStakingService().getStakeAddress(vaultAccountId);
+        const response = await this.requireIagonProvider(ChainProviderCapability.STAKING).getStakeAccountInfo(stakeAddress);
+        return response.data;
+    };
+    getCurrentEpoch = async () => {
+        return await this.requireIagonProvider(ChainProviderCapability.STAKING).getCurrentEpoch();
+    };
+    /**
+     * Query staking rewards for a vault account
+     *
+     * Retrieves detailed information about staking rewards including:
+     * - Individual rewards per epoch
+     * - Historical withdrawals
+     * - Total and available rewards
+     *
+     * @param vaultAccountId - Vault account ID
+     * @returns Detailed rewards data
+     * @throws Error if query fails
+     *
+     * @example
+     * ```typescript
+     * const rewards = await sdk.queryStakingRewards("0");
+     * console.log(`Available rewards: ${rewards.availableRewards} Lovelace`);
+     * console.log(`Total rewards earned: ${rewards.totalRewards} Lovelace`);
+     * console.log(`Total withdrawn: ${rewards.totalWithdrawals} Lovelace`);
+     *
+     * // List rewards by epoch
+     * rewards.rewards.forEach(r => {
+     *   console.log(`Epoch ${r.epoch}: ${r.amount} from pool ${r.poolId}`);
+     * });
+     * ```
+     */
+    queryStakingRewards = async (vaultAccountId) => {
+        this.logger.info(`Querying staking rewards for vault account ${vaultAccountId}`);
+        return await this.requireStakingService().queryStakingRewards(vaultAccountId);
+    };
+    /**
+     * Delegate voting power to a DRep (Delegated Representative) - Conway Era Governance
+     *
+     * In Cardano's Conway era, ADA holders can delegate their voting power to DReps
+     * who participate in on-chain governance. This is separate from stake pool delegation.
+     *
+     * Options:
+     * - "always-abstain": Automatically abstain from all governance votes
+     * - "always-no-confidence": Automatically vote no confidence on all proposals
+     * - "custom-drep": Delegate to a specific DRep (requires drepId)
+     *
+     * @param options - DRep delegation options
+     * @returns Transaction result with hash and status
+     * @throws Error if delegation fails
+     *
+     * @example
+     * ```typescript
+     * // Delegate to always abstain
+     * const result = await sdk.delegateToDRep({
+     *   vaultAccountId: "0",
+     *   drepAction: "always-abstain",
+     *   fee: 1000000 // 1 ADA
+     * });
+     *
+     * // Delegate to a specific DRep
+     * const result = await sdk.delegateToDRep({
+     *   vaultAccountId: "0",
+     *   drepAction: "custom-drep",
+     *   drepId: "drep1abc123...", // DRep ID in hex format
+     *   fee: 1000000
+     * });
+     * console.log(`DRep delegation TX: ${result.txHash}`);
+     * ```
+     */
+    /**
+     * Register the vault account as a DRep (Delegated Representative) on Cardano
+     *
+     * Submits a Conway-era `reg_drep_cert` certificate to register the vault's stake
+     * credential as a DRep. This costs a 500 ADA deposit (refundable on deregistration).
+     * An optional anchor can point to publicly accessible DRep metadata.
+     *
+     * @param options - DRep registration options
+     * @returns Transaction result with hash, status, and the bech32 DRep ID
+     *
+     * @example
+     * ```typescript
+     * // Register without metadata anchor
+     * const result = await sdk.registerAsDRep({ vaultAccountId: "0" });
+     *
+     * // Register with a metadata anchor
+     * const result = await sdk.registerAsDRep({
+     *   vaultAccountId: "0",
+     *   anchor: {
+     *     url: "https://example.com/drep-metadata.json",
+     *     dataHash: "abc123...", // blake2b-256 hex hash of the JSON file
+     *   },
+     * });
+     * console.log(`DRep registration TX: ${result.txHash}, DRep ID: ${result.drepId}`);
+     * ```
+     */
+    registerAsDRep = async (options) => {
+        this.logger.info(`Registering vault account ${options.vaultAccountId} as a DRep`);
+        return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).registerAsDRep(options);
+    };
+    /**
+     * Cast a governance vote as a DRep (Conway era)
+     *
+     * Submits a `voting_procedures` transaction allowing a registered DRep to vote
+     * Yes, No, or Abstain on a governance action.
+     *
+     * @param options - Vote options including governance action ID and vote choice
+     * @returns Transaction result with hash, status, and the vote cast
+     *
+     * @example
+     * ```typescript
+     * const result = await sdk.castGovernanceVote({
+     *   vaultAccountId: "0",
+     *   governanceActionId: {
+     *     txHash: "abc123...", // TX hash of the governance action proposal
+     *     index: 0,
+     *   },
+     *   vote: "yes",
+     * });
+     * console.log(`Vote TX: ${result.txHash}`);
+     * ```
+     */
+    castGovernanceVote = async (options) => {
+        this.logger.info(`Casting vote "${options.vote}" on governance action ${options.governanceActionId.txHash}#${options.governanceActionId.index}`);
+        return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).castVote(options);
+    };
+    delegateToDRep = async (options) => {
+        this.logger.info(`Delegating to DRep (${options.drepAction}) for vault account ${options.vaultAccountId}`);
+        const { vaultAccountId, drepAction, drepId, fee = CardanoAmounts.GOVERNANCE_TX_FEE } = options;
+        return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).delegateToDRep({
+            vaultAccountId,
+            drepAction,
+            drepId,
+            fee,
+        });
+    };
+    /**
+     * Get the stake address for a vault account
+     *
+     * Extracts the BASE address from the vault account and derives the stake address.
+     * The stake address is used to identify staking credentials and query staking-related
+     * information like rewards, delegation history, and registration status.
+     *
+     * @param vaultAccountId - The vault account ID
+     * @returns The stake address in bech32 format (stake1... or stake_test1...)
+     * @throws Error if no BASE address is found for the vault account
+     *
+     * @example
+     * ```typescript
+     * const stakeAddress = await sdk.getStakeAddress("0");
+     * console.log(`Stake address: ${stakeAddress}`);
+     * // Output: stake1u9r76...
+     * ```
+     */
+    getStakeAddress = async (vaultAccountId) => {
+        this.logger.info(`Getting stake address for vault account ${vaultAccountId}`);
+        return await this.requireStakingService().getStakeAddress(vaultAccountId);
+    };
+    /**
+     * Clear all cached data (addresses and public keys)
+     */
+    clearCache() {
+        this.addresses.clear();
+        this.publicKeys.clear();
+        this.logger.info("Cache cleared");
+    }
+    /**
+     * Get asset information including metadata, decimals, and supply
+     *
+     * Retrieves detailed information about a Cardano native token including:
+     * - Asset name (decoded from hex)
+     * - Metadata (name, ticker, description, decimals, logo, etc.)
+     * - Total supply and mint/burn counts
+     * - Fingerprint for unique identification
+     *
+     * @param policyId - The policy ID of the asset (hex string)
+     * @param assetName - The asset name in hex format
+     * @returns Detailed asset information including metadata
+     * @throws Error if asset info retrieval fails
+     *
+     * @example
+     * ```typescript
+     * const assetInfo = await sdk.getAssetInfo(
+     *   "f0ff48bbb7bbe9d59a40f1ce90e9e9d0ff5002ec48f232b49ca0fb9a",
+     *   "4e4654"
+     * );
+     * console.log("Token Name:", assetInfo.data.metadata?.name);
+     * console.log("Decimals:", assetInfo.data.metadata?.decimals);
+     * console.log("Total Supply:", assetInfo.data.total_supply);
+     * ```
+     */
+    async getAssetInfo(policyId, assetName, skipCache = false) {
+        this.logger.info(`Getting asset info for ${policyId}.${assetName}`);
+        return await this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).getAssetInfo(policyId, assetName, skipCache);
+    }
+    /**
+     * Get staking pool information by pool ID
+     *
+     * Returns live metrics including saturation, stake, delegator count, margin, and fixed cost.
+     *
+     * @param poolId - Pool ID in bech32 format (pool1...) or hex
+     * @returns Pool information including saturation and financial metrics
+     */
+    async getPoolInfo(poolId) {
+        this.logger.info(`Getting pool info for ${poolId}`);
+        return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolInfo(poolId);
+    }
+    /**
+     * Get pool metadata (name, ticker, description, homepage)
+     * @param poolId - Pool ID in bech32 format (pool1...) or hex
+     */
+    async getPoolMetadata(poolId) {
+        this.logger.info(`Getting pool metadata for ${poolId}`);
+        return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolMetadata(poolId);
+    }
+    /**
+     * Get aggregate pool delegator count and total active stake
+     * @param poolId - Pool ID in bech32 format (pool1...) or hex
+     */
+    async getPoolDelegators(poolId) {
+        this.logger.info(`Getting pool delegators for ${poolId}`);
+        return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolDelegators(poolId);
+    }
+    /**
+     * Get paginated list of individual pool delegators
+     * @param poolId - Pool ID in bech32 format (pool1...) or hex
+     * @param limit - Maximum number of results (default: 100)
+     * @param offset - Pagination offset (default: 0)
+     */
+    async getPoolDelegatorsList(poolId, limit, offset) {
+        this.logger.info(`Getting pool delegators list for ${poolId}`);
+        return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolDelegatorsList(poolId, limit, offset);
+    }
+    /**
+     * Get pool block production statistics
+     * @param poolId - Pool ID in bech32 format (pool1...) or hex
+     */
+    async getPoolBlocks(poolId) {
+        this.logger.info(`Getting pool blocks for ${poolId}`);
+        return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolBlocks(poolId);
+    }
+    /**
+     * Clear asset info cache
+     * @param policyId - Optional: Clear cache for specific policy ID only
+     * @param assetName - Op
+     * tional: Clear cache for specific asset only (requires policyId)
+     * @example
+     * ```typescript
+     * // Clear entire cache
+     * sdk.clearAssetInfoCache();
+     *
+     * // Clear all assets for a specific policy
+     * sdk.clearAssetInfoCache("f0ff48bbb...");
+     *
+     * // Clear specific asset
+     * sdk.clearAssetInfoCache("f0ff48bbb...", "4e4654");
+     * ```
+     */
+    clearAssetInfoCache(policyId, assetName) {
+        this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).clearAssetInfoCache(policyId, assetName);
+    }
+    /**
+     * Get asset cache statistics
+     * @returns Cache statistics including size, TTL, and entry details
+     * @example
+     * ```typescript
+     * const stats = sdk.getAssetCacheStats();
+     * console.log(`Cache size: ${stats.size}`);
+     * console.log(`Cache TTL: ${stats.ttl}ms`);
+     * stats.entries.forEach(entry => {
+     *   console.log(`${entry.asset}: age ${entry.age}ms, expires in ${entry.expiresIn}ms`);
+     * });
+     * ```
+     */
+    getAssetCacheStats() {
+        return this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).getAssetCacheStats();
+    }
+    /**
+     * Get cache statistics
+     */
+    getCacheStats() {
+        return {
+            addressCount: this.addresses.size,
+            publicKeyCount: this.publicKeys.size,
+        };
+    }
+    /**
+     * Gracefully shutdown the SDK
+     *
+     * Closes all connections, cleans up resources, and prepares for application termination.
+     * Should be called when the application is shutting down.
+     *
+     * @returns Promise that resolves when shutdown is complete
+     *
+     * @example
+     * ```typescript
+     * process.on('SIGTERM', async () => {
+     *   console.log('Shutting down...');
+     *   await sdk.shutdown();
+     *   process.exit(0)
+     * });
+     * ```
+     */
+    async shutdown() {
+        this.logger.info("Shutting down FireblocksCardanoRawSDK...");
+        this.clearCache();
+        this.logger.info("FireblocksCardanoRawSDK shutdown complete");
+    }
+}
+//# sourceMappingURL=FireblocksCardanoRawSDK.js.map

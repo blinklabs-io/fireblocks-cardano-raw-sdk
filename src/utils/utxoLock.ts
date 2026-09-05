@@ -7,7 +7,7 @@
 
 import { CardanoConstants } from "../constants.js";
 
-class UtxoLockManager {
+export class UtxoLockManager {
   private readonly locks = new Map<string, number>();
 
   private key(txId: string, index: number): string {

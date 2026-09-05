@@ -3,6 +3,8 @@ import path, { dirname } from "path";
 import http from "http";
 import { BasePath, ConfigurationOptions } from "@fireblocks/ts-sdk";
 import express, { Request, Response } from "express";
+import helmet from "helmet";
+import { rateLimit } from "express-rate-limit";
 
 import { config, Logger } from "./utils/index.js";
 import { getSwaggerSpec, swaggerUi } from "./utils/swagger.js";
@@ -10,6 +12,7 @@ import { SdkManager } from "./pool/sdkManager.js";
 import { configureRouter } from "./api/router.js";
 import { FireblocksCardanoRawSDK } from "./FireblocksCardanoRawSDK.js";
 import { ChainProviderConfig, Networks } from "./types/index.js";
+import { protectApi, requireApiKey, validateServerApiKey } from "./api/security.js";
 
 const logger = new Logger("app:server-setup");
 
@@ -70,11 +73,34 @@ const startServer = () => {
     throw new Error("CHAIN_PROVIDER must be either 'demeter' or 'iagon'");
   }
 
+  const serverApiKey = validateServerApiKey(process.env.SERVER_API_KEY);
+  const serverHost = process.env.SERVER_HOST || "127.0.0.1";
+  const bodyLimit = process.env.REQUEST_BODY_LIMIT || "256kb";
+  const rateLimitWindowMs = parsePositiveInteger(
+    process.env.RATE_LIMIT_WINDOW_MS,
+    60_000,
+    "RATE_LIMIT_WINDOW_MS"
+  );
+  const rateLimitMax = parsePositiveInteger(process.env.RATE_LIMIT_MAX, 100, "RATE_LIMIT_MAX");
+
   const app = express();
+
+  app.disable("x-powered-by");
+  app.set("trust proxy", process.env.TRUST_PROXY === "true" ? 1 : false);
+  app.use(helmet());
+  app.use(
+    rateLimit({
+      windowMs: rateLimitWindowMs,
+      limit: rateLimitMax,
+      standardHeaders: "draft-8",
+      legacyHeaders: false,
+    })
+  );
 
   // Configure middlewares with raw body preservation for webhook endpoint
   app.use(
     express.json({
+      limit: bodyLimit,
       verify: (req, _res, buf, _encoding) => {
         // Preserve raw body for webhook signature verification
         const r = req as Request & { url?: string; rawBody?: Buffer };
@@ -84,8 +110,7 @@ const startServer = () => {
       },
     })
   );
-  app.use(express.urlencoded({ extended: true }));
-  app.use(errorHandler);
+  app.use(express.urlencoded({ extended: true, limit: bodyLimit }));
 
   // Initialize base config for Fireblocks
   const baseConfig: ConfigurationOptions = {
@@ -97,7 +122,7 @@ const startServer = () => {
   // Get and validate network from environment variable
   const network = validateNetwork(process.env.CARDANO_NETWORK);
 
-  // Initialize SDK Manager with pool configuration
+  // Initialize SDK Manager with pool configuration and the SDK factory used for each vault.
   const sdkManager = new SdkManager(
     baseConfig,
     network,
@@ -108,8 +133,6 @@ const startServer = () => {
       connectionTimeoutMs: parseInt(process.env.POOL_CONNECTION_TIMEOUT_MS || "30000"),
       retryAttempts: parseInt(process.env.POOL_RETRY_ATTEMPTS || "3"),
     },
-
-    // SDK factory function to create FireblocksCardanoRawSDK instances
     async (vaultAccountId: string, fireblocksConfig: ConfigurationOptions, network: Networks) =>
       FireblocksCardanoRawSDK.createInstance({
         fireblocksConfig,
@@ -120,7 +143,7 @@ const startServer = () => {
   );
 
   // Mount API routes with SDK Manager
-  app.use("/api", configureRouter(sdkManager));
+  app.use("/api", protectApi(serverApiKey), configureRouter(sdkManager));
 
   // Health check endpoint
   app.get("/health", (_req: Request, res: Response) => {
@@ -130,18 +153,22 @@ const startServer = () => {
 
   // Swagger documentation endpoints (lazy loaded)
   const swaggerSpec = getSwaggerSpec();
-  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-  app.get("/api-docs-json", (_req, res) => {
+  app.use("/api-docs", requireApiKey(serverApiKey), swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  app.get("/api-docs-json", requireApiKey(serverApiKey), (_req, res) => {
     res.setHeader("Content-Type", "application/json");
     res.send(swaggerSpec);
   });
 
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
-  app.use("/docs", express.static(path.join(__dirname, "../docs")));
+  app.use("/docs", requireApiKey(serverApiKey), express.static(path.join(__dirname, "../docs")));
+  app.use(errorHandler);
 
   // Create HTTP server for graceful shutdown support
   const server = http.createServer(app);
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 5_000;
 
   // Graceful shutdown handler
   let isShuttingDown = false;
@@ -186,10 +213,23 @@ const startServer = () => {
     gracefulShutdown("uncaughtException");
   });
 
-  server.listen(config.PORT, () => {
-    logger.info(`${config.APP_NAME} listening on port ${config.PORT}`);
+  server.listen(config.PORT, serverHost, () => {
+    logger.info(`${config.APP_NAME} listening on ${serverHost}:${config.PORT}`);
     logger.info(`Network: ${network}`);
   });
+};
+
+const parsePositiveInteger = (
+  rawValue: string | undefined,
+  fallback: number,
+  variableName: string
+): number => {
+  if (rawValue === undefined) return fallback;
+  const parsed = Number(rawValue);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${variableName} must be a positive integer`);
+  }
+  return parsed;
 };
 
 const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {

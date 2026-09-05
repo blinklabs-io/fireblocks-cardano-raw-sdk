@@ -86,6 +86,24 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
     if (!baseUrl) {
       throw new Error("DEMETER_BLOCKFROST_URL is required");
     }
+    let parsedBaseUrl: URL;
+    try {
+      parsedBaseUrl = new URL(baseUrl);
+    } catch {
+      throw new Error("DEMETER_BLOCKFROST_URL must be a valid absolute URL");
+    }
+    const isLoopback = ["localhost", "127.0.0.1", "::1"].includes(parsedBaseUrl.hostname);
+    if (
+      parsedBaseUrl.protocol !== "https:" &&
+      !(parsedBaseUrl.protocol === "http:" && isLoopback)
+    ) {
+      throw new Error(
+        "DEMETER_BLOCKFROST_URL must use HTTPS (HTTP is allowed only for loopback tests)"
+      );
+    }
+    if (parsedBaseUrl.username || parsedBaseUrl.password) {
+      throw new Error("DEMETER_BLOCKFROST_URL must not contain embedded credentials");
+    }
     if (!options.apiKey?.trim()) {
       throw new Error("DEMETER_API_KEY is required");
     }
