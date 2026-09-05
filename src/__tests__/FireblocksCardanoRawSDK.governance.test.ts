@@ -78,38 +78,43 @@ describe("Fireblocks governed ADA transfer", () => {
       getTransactionDetails: jest.fn(async () => null),
     };
 
-    const signTransaction = jest.fn(async (payload: any) => {
-      const content = payload.extraParameters.rawMessageData.messages[0].content as string;
-      const signature = (invalidSignature ? PrivateKey.generate_ed25519() : paymentKey).sign(
-        Buffer.from(content, "hex")
-      );
-      return {
-        id: "fireblocks-tx-123",
-        data: [
-          {
-            content,
-            publicKey: paymentKey.to_public().to_hex(),
-            signature: { fullSig: signature.to_hex() },
+    const signTransaction = jest.fn(
+      async (payload: {
+        extraParameters: { rawMessageData: { messages: Array<{ content: string }> } };
+        externalTxId?: string;
+      }) => {
+        const content = payload.extraParameters.rawMessageData.messages[0].content as string;
+        const signature = (invalidSignature ? PrivateKey.generate_ed25519() : paymentKey).sign(
+          Buffer.from(content, "hex")
+        );
+        return {
+          id: "fireblocks-tx-123",
+          data: [
+            {
+              content,
+              publicKey: paymentKey.to_public().to_hex(),
+              signature: { fullSig: signature.to_hex() },
+            },
+          ],
+          transaction: {
+            id: transactionResponseId,
+            externalTxId: payload.externalTxId,
+            status: fireblocksStatus,
+            signedBy: [signerId],
+            authorizationInfo: {
+              logic: authorizationLogic,
+              allowOperatorAsAuthorizer: false,
+              groups: [
+                {
+                  th: 1,
+                  users: { "approval-user": authorizationStatus },
+                },
+              ],
+            },
           },
-        ],
-        transaction: {
-          id: transactionResponseId,
-          externalTxId: payload.externalTxId,
-          status: fireblocksStatus,
-          signedBy: [signerId],
-          authorizationInfo: {
-            logic: authorizationLogic,
-            allowOperatorAsAuthorizer: false,
-            groups: [
-              {
-                th: 1,
-                users: { "approval-user": authorizationStatus },
-              },
-            ],
-          },
-        },
-      };
-    });
+        };
+      }
+    );
     const fireblocksService = {
       getVaultAccountAddress: jest.fn(async () => ({
         address: senderAddress,

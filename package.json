@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
+    "build:check": "npm run build && git diff --exit-code -- dist",
     "build:w": "tsc -w",
     "start": "node ./dist/app.js",
     "dev": "concurrently \"npm:build:w\" \"npm:start\"",
@@ -14,11 +15,15 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.poc.json",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src --ext .ts --max-warnings=0",
     "test": "jest",
+    "audit:prod": "npm audit --omit=dev --audit-level=moderate",
+    "quality": "npm run format:check && npm run lint && npm run typecheck && npm test -- --runInBand && npm run build:check && npm run audit:prod && npm run docs:verify && npm run docs:check",
     "poc:mock": "CUSTODY_MODE=mock tsx scripts/run-demeter-poc.ts",
     "poc:fireblocks": "CUSTODY_MODE=fireblocks tsx scripts/run-demeter-poc.ts",
-    "docs": "typedoc src"
+    "docs": "typedoc src",
+    "docs:check": "npm run docs && git diff --exit-code -- docs",
+    "docs:verify": "node scripts/verify-docs.mjs"
   },
   "keywords": [
     "cardano",
@@ -29,13 +34,14 @@
     "ada"
   ],
   "author": "Fireblocks",
-  "license": "ISC",
+  "license": "UNLICENSED",
   "description": "Fireblocks Cardano Raw SDK with selectable IAGON and Demeter Blockfrost providers",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.14.1",
+    "@types/supertest": "^7.2.1",
     "@types/swagger-jsdoc": "^6.0.4",
     "@types/swagger-ui-express": "^4.1.8",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
@@ -45,6 +51,7 @@
     "globals": "^17.4.0",
     "jest": "^30.2.0",
     "prettier": "^3.2.5",
+    "supertest": "^7.2.2",
     "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
@@ -56,14 +63,32 @@
     "@fireblocks/ts-sdk": "^12.1.1",
     "axios": "^1.10.0",
     "bech32": "^2.0.0",
-    "blakejs": "^1.2.1",
     "bip39": "^3.1.0",
+    "blakejs": "^1.2.1",
     "cbor2": "^2.0.1",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
     "jose": "^6.1.3",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
     "zod": "^4.1.13"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
+  "typedocOptions": {
+    "gitRemote": "origin",
+    "gitRevision": "main",
+    "highlightLanguages": [
+      "mermaid",
+      "typescript",
+      "javascript",
+      "js",
+      "bash",
+      "json",
+      "text"
+    ]
   }
 }

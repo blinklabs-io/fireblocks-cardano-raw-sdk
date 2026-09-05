@@ -403,8 +403,7 @@ export class ApiController {
       // Extract headers for signature verification
       const headers: Record<string, string | undefined> = {
         "fireblocks-webhook-signature": req.headers["fireblocks-webhook-signature"] as
-          | string
-          | undefined,
+          string | undefined,
         "fireblocks-signature": req.headers["fireblocks-signature"] as string | undefined,
       };
 

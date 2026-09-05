@@ -97,9 +97,7 @@ const loadConfigFromEnv = (): Config => {
     FIREBLOCKS: {
       apiKey: process.env.FIREBLOCKS_API_USER_KEY || "",
       secretKey: getSecretKey(),
-      basePath: validateBasePath(
-        process.env.FIREBLOCKS_BASE_PATH || process.env.BASE_PATH || ""
-      ),
+      basePath: validateBasePath(process.env.FIREBLOCKS_BASE_PATH || process.env.BASE_PATH || ""),
     },
     APP_NAME: process.env.APP_NAME || "cardano-raw-sdk",
   };

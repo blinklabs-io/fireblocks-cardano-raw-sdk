@@ -1,0 +1,518 @@
+/**
+ * Staking Service for Cardano
+ * Orchestrates staking operations with clear separation of concerns
+ */
+import { Logger, ErrorHandler, getCertificateFromBaseAddress, getStakeAddressFromBaseAddress, buildRegistrationCertificate, buildDelegationCertificate, buildDeregistrationCertificate, buildVoteDelegationCertificate, buildDRepRegistrationCertificate, buildVotingProcedures, encodeDRepId, serializeWithdrawals, embedSignaturesInTx, getSigningPayload, drepActionToDRepInfo, } from "../../utils/index.js";
+import { Networks, StakingOperation, SdkApiError, DRepAction, } from "../../types/index.js";
+import { MIN_DREP_DELEGATION_AMOUNT_MULTIPLIER, } from "./types/staking.interfaces.js";
+import { NetworkConfiguration, StakeAddressResolver, UtxoProvider, TransactionSigner, TransactionBuilder, TransactionSubmitter, StakingValidator, RewardsQueryService, TransactionLogger, RegistrationVerifier, } from "./helpers/index.js";
+import { CardanoAmounts, CardanoConstants } from "../../constants.js";
+/**
+ * Main Staking Service
+ * Orchestrates staking operations by coordinating specialized helper services
+ */
+export class StakingService {
+    logger = new Logger("services:staking-service");
+    errorHandler = new ErrorHandler("staking-service", this.logger);
+    // Dependencies
+    networkConfig;
+    addressResolver;
+    utxoProvider;
+    transactionSigner;
+    transactionSubmitter;
+    validator;
+    transactionBuilder;
+    transactionLogger;
+    rewardsService;
+    registrationVerifier;
+    // External services
+    iagonApiService;
+    constructor(fireblocksService, iagonApiService, network = Networks.MAINNET) {
+        this.iagonApiService = iagonApiService;
+        // Initialize configuration and dependencies
+        this.networkConfig = new NetworkConfiguration(network);
+        this.addressResolver = new StakeAddressResolver(fireblocksService, this.networkConfig, this.logger);
+        this.utxoProvider = new UtxoProvider(fireblocksService, iagonApiService, this.networkConfig, this.logger);
+        this.transactionSigner = new TransactionSigner(fireblocksService, this.networkConfig, this.logger, this.errorHandler);
+        this.transactionSubmitter = new TransactionSubmitter(iagonApiService);
+        this.validator = new StakingValidator(iagonApiService, this.addressResolver, this.logger);
+        this.transactionBuilder = new TransactionBuilder(iagonApiService, this.networkConfig, this.logger);
+        this.transactionLogger = new TransactionLogger(this.logger);
+        this.rewardsService = new RewardsQueryService(iagonApiService, this.logger);
+        this.registrationVerifier = new RegistrationVerifier(iagonApiService, this.logger);
+    }
+    // ============================================================================
+    // Public API
+    // ============================================================================
+    /**
+     * Register staking credential for a vault account
+     * Automatically finds an address with suitable pure ADA UTXO
+     */
+    async registerStakingCredential(options) {
+        const { vaultAccountId, depositAmount = CardanoAmounts.DEPOSIT_AMOUNT, fee = CardanoAmounts.STAKING_TX_FEE, } = options;
+        this.logger.info(`Registering staking credential for vault account ${vaultAccountId}`);
+        try {
+            const existingRegistration = await this.validator.checkRegistrationStatus(vaultAccountId);
+            if (existingRegistration) {
+                return await this.handleAlreadyRegistered(vaultAccountId);
+            }
+            const minInputAmount = depositAmount + fee + CardanoConstants.MIN_UTXO_BASE_LOVELACE;
+            const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(vaultAccountId, minInputAmount);
+            const txHash = await this.executeRegistration(vaultAccountId, addressWithUtxo, depositAmount, fee);
+            const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
+            // Fire-and-forget: verifyAsync handles its own errors internally via .catch()
+            void this.registrationVerifier.verifyAsync(stakeAddress);
+            return {
+                txHash,
+                status: "submitted",
+                operation: StakingOperation.REGISTER,
+                stakeAddress,
+                addressIndex: addressWithUtxo.addressIndex,
+            };
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "registering staking credential");
+        }
+    }
+    /**
+     * Delegate to a stake pool
+     */
+    async delegateToPool(options) {
+        const { vaultAccountId, poolId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
+        this.logger.info(`Delegating to pool ${poolId} for vault account ${vaultAccountId}`);
+        try {
+            await this.validator.validateDelegationPrerequisites(vaultAccountId, poolId);
+            const minAmount = CardanoConstants.MIN_UTXO_BASE_LOVELACE + fee;
+            const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(vaultAccountId, minAmount);
+            this.logger.info(`Using address: ${addressWithUtxo.address}, index: ${addressWithUtxo.addressIndex}`);
+            const certificate = getCertificateFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+            const delegationCertificate = buildDelegationCertificate(certificate, poolId);
+            const txHash = await this.buildSignAndSubmit({
+                vaultAccountId,
+                addressInfo: addressWithUtxo,
+                netAmount: addressWithUtxo.utxo.nativeAmount - fee,
+                fee,
+                certificates: [delegationCertificate],
+                operation: "delegate to pool",
+                skipValidation: true,
+            });
+            this.logger.info(`Delegation transaction submitted: ${txHash.data.txHash}`);
+            return {
+                txHash: txHash.data.txHash,
+                status: "submitted",
+                operation: StakingOperation.DELEGATE,
+            };
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "delegating to stake pool");
+        }
+    }
+    /**
+     * Deregister staking credential (includes reward withdrawal)
+     */
+    async deregisterStakingCredential(options) {
+        const { vaultAccountId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
+        this.logger.info(`Deregistering staking credential for vault account ${vaultAccountId}`);
+        try {
+            const isRegistered = await this.validator.checkRegistrationStatus(vaultAccountId);
+            if (!isRegistered) {
+                this.logger.info(`Staking credential not registered for vault ${vaultAccountId}`);
+                return {
+                    txHash: "",
+                    status: "not_registered",
+                    operation: StakingOperation.DEREGISTER,
+                };
+            }
+            const minInputAmount = CardanoConstants.MIN_UTXO_BASE_LOVELACE + fee;
+            const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(vaultAccountId, minInputAmount);
+            const txHash = await this.executeDeregistration(vaultAccountId, addressWithUtxo, fee);
+            return {
+                txHash,
+                status: "submitted",
+                operation: StakingOperation.DEREGISTER,
+            };
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "deregistering staking credential");
+        }
+    }
+    /**
+     * Withdraw staking rewards
+     */
+    async withdrawRewards(options) {
+        try {
+            const { vaultAccountId, limit, fee } = options;
+            this.validateWithdrawalLimit(limit);
+            await this.validator.validateRegistrationStatus(vaultAccountId, true);
+            this.logger.info(`Withdrawing rewards for vault account ${vaultAccountId}`);
+            const minInputAmount = CardanoConstants.MIN_UTXO_BASE_LOVELACE + fee;
+            const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(vaultAccountId, minInputAmount);
+            const certificate = getCertificateFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+            const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
+            // Treat 0, undefined, or null as "no limit" (withdraw all available rewards)
+            const maxWithdrawal = limit && limit > 0 ? limit : Infinity;
+            const { withdrawal, rewardAmount } = await this.rewardsService.getWithdrawals(stakeAddress, certificate, maxWithdrawal, this.networkConfig.isMainnet());
+            if (rewardAmount === 0) {
+                return {
+                    txHash: "",
+                    status: "no_rewards",
+                    operation: StakingOperation.WITHDRAW_REWARDS,
+                };
+            }
+            // Build a helper so we can retry with a corrected amount without repeating code
+            const buildAndSubmitWithdrawal = async (amount) => {
+                const netAmount = addressWithUtxo.utxo.nativeAmount - fee + amount;
+                const w = { ...withdrawal, reward: amount };
+                const withdrawalsDict = serializeWithdrawals([w]);
+                return this.buildSignAndSubmit({
+                    vaultAccountId,
+                    addressInfo: addressWithUtxo,
+                    netAmount,
+                    fee,
+                    withdrawals: withdrawalsDict,
+                    operation: "withdraw staking rewards",
+                });
+            };
+            let submitResponse;
+            let finalRewardAmount = rewardAmount;
+            try {
+                submitResponse = await buildAndSubmitWithdrawal(rewardAmount);
+            }
+            catch (firstError) {
+                // The Cardano ledger requires withdrawals to consume the full reward balance.
+                // If the API returned a stale value the node rejects the tx. Re-query once and
+                // retry so the corrected amount matches the on-chain balance.
+                if (!this.isIncompleteWithdrawalsError(firstError)) {
+                    throw firstError;
+                }
+                this.logger.warn(`Submission rejected: incomplete withdrawals (API reported ${rewardAmount} lovelace). Waiting for indexer to sync, then re-querying...`);
+                await new Promise((r) => setTimeout(r, 2000));
+                const refreshed = await this.rewardsService.getWithdrawals(stakeAddress, certificate, maxWithdrawal, this.networkConfig.isMainnet());
+                if (refreshed.rewardAmount === rewardAmount) {
+                    // API is consistently returning the same stale value — nothing we can do.
+                    throw firstError;
+                }
+                this.logger.info(`Retrying withdrawal with corrected amount: ${refreshed.rewardAmount} lovelace (was ${rewardAmount})`);
+                finalRewardAmount = refreshed.rewardAmount;
+                submitResponse = await buildAndSubmitWithdrawal(finalRewardAmount);
+            }
+            this.logger.info(`Reward withdrawal transaction submitted: ${submitResponse.data.txHash}`);
+            return {
+                txHash: submitResponse.data.txHash,
+                status: "submitted",
+                operation: StakingOperation.WITHDRAW_REWARDS,
+                rewardAmount: finalRewardAmount,
+            };
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "withdrawing staking rewards");
+        }
+    }
+    /**
+     * Delegate voting power to a DRep (Conway era governance)
+     */
+    async delegateToDRep(options) {
+        try {
+            const { vaultAccountId, drepAction, drepId, fee = CardanoAmounts.GOVERNANCE_TX_FEE, } = options;
+            this.logger.info(`Delegating to DRep (${drepAction}) for vault account ${vaultAccountId}`);
+            this.validateDRepOptions(drepAction, drepId);
+            await this.validator.validateRegistrationStatus(vaultAccountId, true);
+            const minInputAmount = fee * MIN_DREP_DELEGATION_AMOUNT_MULTIPLIER;
+            const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(vaultAccountId, minInputAmount);
+            const certificate = getCertificateFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+            const drepInfo = drepActionToDRepInfo(drepAction, drepId);
+            const voteDelegationCertificate = buildVoteDelegationCertificate(certificate, drepInfo);
+            const netAmount = addressWithUtxo.utxo.nativeAmount - fee;
+            const submitResponse = await this.buildSignAndSubmit({
+                vaultAccountId,
+                addressInfo: addressWithUtxo,
+                netAmount,
+                fee,
+                certificates: [voteDelegationCertificate],
+                operation: `delegate to DRep (${drepAction})`,
+                skipValidation: true,
+                skipTtl: true, // Conway-era governance transactions don't use TTL
+            });
+            this.logger.info(`DRep delegation transaction submitted: ${submitResponse.data.txHash}`);
+            return {
+                txHash: submitResponse.data.txHash,
+                status: "submitted",
+                operation: StakingOperation.VOTE_DELEGATE,
+            };
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "delegating to DRep");
+        }
+    }
+    /**
+     * Register the vault account as a DRep (Conway era governance)
+     */
+    async registerAsDRep(options) {
+        try {
+            const { vaultAccountId, anchor, depositAmount = CardanoAmounts.DREP_REGISTRATION_DEPOSIT, fee = CardanoAmounts.GOVERNANCE_TX_FEE, } = options;
+            this.logger.info(`Registering vault account ${vaultAccountId} as a DRep`);
+            const minInputAmount = depositAmount + fee;
+            const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(vaultAccountId, minInputAmount);
+            const credential = getCertificateFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+            const drepRegistrationCertificate = buildDRepRegistrationCertificate(credential, depositAmount, anchor);
+            const drepId = encodeDRepId(credential);
+            const netAmount = addressWithUtxo.utxo.nativeAmount - fee - depositAmount;
+            const submitResponse = await this.buildSignAndSubmit({
+                vaultAccountId,
+                addressInfo: addressWithUtxo,
+                netAmount,
+                fee,
+                certificates: [drepRegistrationCertificate],
+                operation: "register as DRep",
+                skipValidation: true,
+                skipTtl: true,
+            });
+            this.logger.info(`DRep registration transaction submitted: ${submitResponse.data.txHash}, DRep ID: ${drepId}`);
+            return {
+                txHash: submitResponse.data.txHash,
+                status: "submitted",
+                operation: StakingOperation.REGISTER_DREP,
+                drepId,
+                addressIndex: addressWithUtxo.addressIndex,
+            };
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "registering as DRep");
+        }
+    }
+    /**
+     * Cast a governance vote as a DRep (Conway era)
+     */
+    async castVote(options) {
+        try {
+            const { vaultAccountId, governanceActionId, vote, anchor, fee = CardanoAmounts.GOVERNANCE_TX_FEE, } = options;
+            this.logger.info(`Casting vote "${vote}" on governance action ${governanceActionId.txHash}#${governanceActionId.index} for vault ${vaultAccountId}`);
+            const voteInteger = vote === "no" ? 0 : vote === "yes" ? 1 : 2;
+            const minInputAmount = fee;
+            const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(vaultAccountId, minInputAmount);
+            const credential = getCertificateFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+            const votingProcedures = buildVotingProcedures(credential, governanceActionId, voteInteger, anchor);
+            const netAmount = addressWithUtxo.utxo.nativeAmount - fee;
+            const submitResponse = await this.buildSignAndSubmit({
+                vaultAccountId,
+                addressInfo: addressWithUtxo,
+                netAmount,
+                fee,
+                votingProcedures,
+                operation: `cast vote "${vote}" on governance action`,
+                skipValidation: true,
+                skipTtl: true,
+            });
+            this.logger.info(`Governance vote transaction submitted: ${submitResponse.data.txHash}`);
+            return {
+                txHash: submitResponse.data.txHash,
+                status: "submitted",
+                operation: StakingOperation.CAST_VOTE,
+                vote,
+                governanceActionId,
+            };
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "casting governance vote");
+        }
+    }
+    /**
+     * Get stake address for a vault account
+     */
+    async getStakeAddress(vaultAccountId) {
+        return await this.addressResolver.getStakeAddress(vaultAccountId);
+    }
+    /**
+     * Query staking rewards for a vault account
+     */
+    async queryStakingRewards(vaultAccountId) {
+        try {
+            this.logger.info(`Querying staking rewards for vault account ${vaultAccountId}`);
+            const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
+            return await this.rewardsService.queryRewards(stakeAddress);
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "querying staking rewards");
+        }
+    }
+    /**
+     * Get delegation history for a vault account
+     */
+    async getDelegationHistory(vaultAccountId, limit = 100) {
+        try {
+            this.logger.info(`Getting delegation history for vault account ${vaultAccountId}`);
+            const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
+            return await this.iagonApiService.getDelegationHistory(stakeAddress, 0, limit);
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "getting delegation history");
+        }
+    }
+    /**
+     * Get registration/deregistration history for a vault account
+     */
+    async getRegistrationHistory(vaultAccountId, limit = 100) {
+        try {
+            this.logger.info(`Getting registration history for vault account ${vaultAccountId}`);
+            const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
+            return await this.iagonApiService.getRegistrationHistory(stakeAddress, limit);
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "getting registration history");
+        }
+    }
+    /**
+     * Get complete stake account information
+     */
+    async getStakeAccountInfo(vaultAccountId) {
+        try {
+            this.logger.info(`Getting stake account info for vault account ${vaultAccountId}`);
+            const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
+            return await this.iagonApiService.getStakeAccountInfo(stakeAddress);
+        }
+        catch (error) {
+            throw this.errorHandler.handleApiError(error, "getting stake account info");
+        }
+    }
+    // ============================================================================
+    // Private Methods (Orchestration)
+    // ============================================================================
+    async handleAlreadyRegistered(vaultAccountId) {
+        const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
+        const accountInfo = await this.iagonApiService.getStakeAccountInfo(stakeAddress);
+        this.logger.info(`Stake key already registered at epoch ${accountInfo.data.active_epoch}`);
+        return {
+            txHash: "",
+            status: "already_registered",
+            operation: StakingOperation.REGISTER,
+            stakeAddress,
+            addressIndex: 0,
+        };
+    }
+    /**
+     * Common transaction execution workflow
+     * Handles: TTL calculation, transaction building, signing, logging, and submission
+     */
+    async executeTransaction(params) {
+        const { vaultAccountId, addressWithUtxo, netAmount, fee, certificates, withdrawals, votingProcedures, operation, skipValidation = false, skipTtl = false, } = params;
+        // Get TTL and build transaction
+        // Conway-era governance transactions (vote delegation) should not include TTL
+        const ttl = skipTtl ? undefined : await this.transactionBuilder.getCurrentTtl();
+        const { serialized, deserialized } = await this.transactionBuilder.buildTransaction({
+            toAddress: addressWithUtxo.address,
+            netAmount,
+            utxo: addressWithUtxo.utxo,
+            fee,
+            ttl,
+            certificates,
+            withdrawals,
+            votingProcedures,
+            network: this.networkConfig.network,
+        });
+        // Sign transaction
+        const txHash = getSigningPayload(serialized);
+        const witnesses = await this.transactionSigner.signTransaction({
+            txHash: txHash.toString("hex"),
+            vaultAccountId,
+            operation,
+            addressIndex: addressWithUtxo.addressIndex,
+        });
+        // Embed signatures and log
+        const signedTx = embedSignaturesInTx(deserialized, witnesses);
+        this.transactionLogger.logTransactionDetails(serialized, txHash, witnesses, signedTx);
+        // Submit transaction
+        const submitResponse = await this.transactionSubmitter.submitTransaction(signedTx, skipValidation);
+        this.logger.info(`${operation} transaction submitted: ${submitResponse.data.txHash}`);
+        return submitResponse.data.txHash;
+    }
+    async executeRegistration(vaultAccountId, addressWithUtxo, depositAmount, fee) {
+        const certificate = getCertificateFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+        const netAmount = addressWithUtxo.utxo.nativeAmount - fee - depositAmount;
+        const registrationCertificate = buildRegistrationCertificate(certificate);
+        return await this.executeTransaction({
+            vaultAccountId,
+            addressWithUtxo,
+            netAmount,
+            fee,
+            certificates: [registrationCertificate],
+            operation: "register staking credential",
+            skipValidation: true,
+        });
+    }
+    async executeDeregistration(vaultAccountId, addressWithUtxo, fee) {
+        const certificate = getCertificateFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+        const stakeAddress = getStakeAddressFromBaseAddress(addressWithUtxo.address, this.networkConfig.isMainnet());
+        const { withdrawal, rewardAmount } = await this.rewardsService.getWithdrawals(stakeAddress, certificate, Infinity, this.networkConfig.isMainnet());
+        const deregistrationCertificate = buildDeregistrationCertificate(certificate);
+        const buildAndSubmitDeregistration = async (amount) => {
+            const w = amount > 0 ? { ...withdrawal, reward: amount } : null;
+            const withdrawalsDict = w ? serializeWithdrawals([w]) : undefined;
+            const netAmount = addressWithUtxo.utxo.nativeAmount - fee + CardanoAmounts.DEPOSIT_AMOUNT + amount;
+            return this.executeTransaction({
+                vaultAccountId,
+                addressWithUtxo,
+                netAmount,
+                fee,
+                certificates: [deregistrationCertificate],
+                withdrawals: withdrawalsDict,
+                operation: "deregister staking credential",
+                skipValidation: true,
+            });
+        };
+        try {
+            return await buildAndSubmitDeregistration(rewardAmount);
+        }
+        catch (firstError) {
+            if (!this.isIncompleteWithdrawalsError(firstError) || rewardAmount === 0) {
+                throw firstError;
+            }
+            this.logger.warn(`Deregistration rejected: incomplete withdrawals (API reported ${rewardAmount} lovelace). Waiting for indexer to sync, then re-querying...`);
+            await new Promise((r) => setTimeout(r, 2000));
+            const refreshed = await this.rewardsService.getWithdrawals(stakeAddress, certificate, Infinity, this.networkConfig.isMainnet());
+            if (refreshed.rewardAmount === rewardAmount) {
+                throw firstError;
+            }
+            this.logger.info(`Retrying deregistration with corrected reward amount: ${refreshed.rewardAmount} lovelace`);
+            return await buildAndSubmitDeregistration(refreshed.rewardAmount);
+        }
+    }
+    async buildSignAndSubmit(params) {
+        const { vaultAccountId, addressInfo, netAmount, fee, certificates, withdrawals, votingProcedures, operation, skipValidation = false, skipTtl = false, } = params;
+        const txHash = await this.executeTransaction({
+            vaultAccountId,
+            addressWithUtxo: addressInfo,
+            netAmount,
+            fee,
+            certificates,
+            withdrawals,
+            votingProcedures,
+            operation,
+            skipValidation,
+            skipTtl,
+        });
+        // Return the full response for methods that need it
+        return { data: { txHash } };
+    }
+    validateWithdrawalLimit(limit) {
+        if (limit !== undefined && limit < 0) {
+            throw new SdkApiError("Withdrawal limit cannot be negative", 400, "INVALID_LIMIT", { limit }, "staking-service");
+        }
+    }
+    validateDRepOptions(drepAction, drepId) {
+        if (drepAction === DRepAction.CUSTOM_DREP && !drepId) {
+            throw new SdkApiError("drepId is required for custom-drep action", 400, "MISSING_DREP_ID", { drepAction }, "staking-service");
+        }
+    }
+    /**
+     * Returns true when the error is a Cardano ledger rejection indicating that the
+     * withdrawal amount in the transaction does not match the on-chain reward balance.
+     * This happens when the API returns a stale reward value.
+     */
+    isIncompleteWithdrawalsError(error) {
+        const msg = (error instanceof Error ? error.message : "").toLowerCase();
+        return (msg.includes("incomplete") ||
+            msg.includes("rewards in full") ||
+            msg.includes("incompletewithdrawals"));
+    }
+}
+//# sourceMappingURL=staking.service.js.map

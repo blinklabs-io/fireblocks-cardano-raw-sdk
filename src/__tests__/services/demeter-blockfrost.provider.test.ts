@@ -40,6 +40,20 @@ describe("DemeterBlockfrostProvider", () => {
       "DEMETER_BLOCKFROST_URL"
     );
     expect(() => new DemeterBlockfrostProvider({ baseUrl, apiKey: "" })).toThrow("DEMETER_API_KEY");
+    expect(
+      () =>
+        new DemeterBlockfrostProvider({
+          baseUrl: "http://cardano-preview.example.com",
+          apiKey: "key",
+        })
+    ).toThrow("must use HTTPS");
+    expect(
+      () =>
+        new DemeterBlockfrostProvider({
+          baseUrl: "https://user:password@cardano-preview.example.com",
+          apiKey: "key",
+        })
+    ).toThrow("must not contain embedded credentials");
     expect(() => provider({ maxRetries: -1 })).toThrow("maxRetries");
     expect(() => provider({ maxRetries: 11 })).toThrow("maxRetries");
     expect(() => provider({ pageSize: 0 })).toThrow("pageSize");
