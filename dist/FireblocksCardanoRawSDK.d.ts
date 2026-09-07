@@ -12,6 +12,8 @@ export interface SDKConfig {
     logger: Logger;
 }
 export declare class FireblocksCardanoRawSDK {
+    /** Narrow indexed reads. Broad legacy capability flags do not imply these operations, or vice versa. */
+    getChainQueries(): import("./types/chain-queries.js").ChainQueries;
     private readonly fireblocksService;
     private readonly chainProvider;
     private readonly iagonApiService?;
@@ -125,6 +127,10 @@ export declare class FireblocksCardanoRawSDK {
      * Get transaction details by hash
      */
     getTransactionDetails: (hash: string) => Promise<TransactionDetailsResponse | null>;
+    /** Explicit full-details read; lightweight polling is kept separate. */
+    getFullTransactionDetails: (hash: string) => Promise<TransactionDetailsResponse | null>;
+    /** Fresh protocol snapshot for Demeter transfers; legacy IAGON keeps its existing defaults. */
+    private transferProtocolParameters;
     /**
      * Get UTXOs for a vault account address
      */

@@ -1,6 +1,7 @@
 import { Address } from "@emurgo/cardano-serialization-lib-nodejs";
 import { UtxoData } from "./UTXOs.js";
 import { TokenTransferSpec } from "./general.js";
+import { ProtocolParameterSnapshot } from "../providers.js";
 export interface LastUpdated {
     slot_no: number;
     block_hash: string;
@@ -15,11 +16,14 @@ export interface TransactionInput {
     output_index: number;
     address: string;
     value: TransactionValue;
+    collateral?: boolean;
+    reference?: boolean;
 }
 export interface TransactionOutput {
     output_index: number;
     address: string;
     value: TransactionValue;
+    collateral?: boolean;
 }
 export interface DetailedTransaction {
     tx_hash: string;
@@ -31,6 +35,8 @@ export interface DetailedTransaction {
     size: number;
     inputs: TransactionInput[];
     outputs: TransactionOutput[];
+    /** False for lightweight provider lookups; true only after successful UTxO hydration. */
+    utxosComplete?: boolean;
     address?: string;
 }
 export interface TransactionPagination {
@@ -59,6 +65,7 @@ export interface TransactionDetailsResponse {
     data: DetailedTransaction;
 }
 export interface CntTransactionOutputsParams {
+    protocolParameters?: ProtocolParameterSnapshot;
     requiredLovelace: number;
     fee: number;
     recipientAddress: Address;
@@ -69,6 +76,7 @@ export interface CntTransactionOutputsParams {
     selectedUtxos: UtxoData[];
 }
 export interface MultiTokenTransactionOutputsParams {
+    protocolParameters?: ProtocolParameterSnapshot;
     /** All tokens to send to the recipient in a single output */
     tokens: TokenTransferSpec[];
     fee: number;
@@ -79,6 +87,7 @@ export interface MultiTokenTransactionOutputsParams {
     minRecipientLovelace?: number;
 }
 export interface ConsolidationTransactionOutputParams {
+    protocolParameters?: ProtocolParameterSnapshot;
     fee: number;
     senderAddress: Address;
     selectedUtxos: UtxoData[];

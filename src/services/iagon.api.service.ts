@@ -5,6 +5,8 @@ import { ErrorHandler } from "../utils/errorHandler.js";
 import { decodeAssetName } from "../utils/general.js";
 import { Logger } from "../utils/logger.js";
 import { iagonBaseUrl } from "../constants.js";
+import { IagonQueries } from "./iagon.queries.js";
+import type { ChainQueries } from "../types/chain-queries.js";
 
 // Zod schemas for critical Iagon responses
 const utxoDataSchema = z.object({
@@ -84,6 +86,7 @@ interface CachedAssetInfo {
 }
 
 export class IagonApiService implements CardanoDataProvider {
+  public readonly queries: ChainQueries = new IagonQueries(this);
   public readonly kind = "iagon" as const;
   public readonly capabilities = new Set(Object.values(ChainProviderCapability));
   private readonly logger = new Logger("services:iagon-api-service");
