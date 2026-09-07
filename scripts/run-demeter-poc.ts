@@ -22,6 +22,7 @@ import {
   calculateTtl,
   createTransactionInputs,
   fetchAndSelectUtxosForAda,
+  validateProtocolParameters,
 } from "../src/utils/index.js";
 
 dotenv.config({ path: process.env.CARDANO_ENV_FILE || ".env.development" });
@@ -125,6 +126,8 @@ const runMock = async (): Promise<void> => {
   });
   const ttl = calculateTtl(await provider.getCurrentSlot());
   const inputs = createTransactionInputs(utxoResult.selectedUtxos);
+  const protocolParameters = await provider.getProtocolParameters();
+  validateProtocolParameters(protocolParameters, 2);
   const recipient = Address.from_bech32(recipientAddress);
   const sender = Address.from_bech32(senderAddress);
   const built = buildAdaTransactionWithCalculatedFee(
@@ -133,6 +136,7 @@ const runMock = async (): Promise<void> => {
       recipientAddress: recipient,
       senderAddress: sender,
       selectedUtxos: utxoResult.selectedUtxos,
+      protocolParameters,
     },
     inputs,
     ttl,

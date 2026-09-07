@@ -7,6 +7,7 @@ export * from "./fireblocks.js";
 export * from "./governance.js";
 export * from "./operations.js";
 export * from "./providers.js";
+export * from "./chain-queries.js";
 export * from "./transactions.js";
 export * from "./staking.js";
 //# sourceMappingURL=index.d.ts.map

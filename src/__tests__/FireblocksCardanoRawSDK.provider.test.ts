@@ -18,6 +18,7 @@ jest.mock("@fireblocks/ts-sdk", () => {
 import { BasePath } from "@fireblocks/ts-sdk";
 import { FireblocksCardanoRawSDK } from "../FireblocksCardanoRawSDK.js";
 import { IagonApiService } from "../services/iagon.api.service.js";
+import { DemeterBlockfrostProvider } from "../services/demeter-blockfrost.provider.js";
 import {
   ChainProviderCapability,
   Networks,
@@ -124,5 +125,25 @@ describe("FireblocksCardanoRawSDK provider compatibility", () => {
       provider: "demeter",
       capability: ChainProviderCapability.HISTORY,
     });
+  });
+
+  it("routes explicit full transaction lookup through the selected provider", async () => {
+    const lookup = jest
+      .spyOn(DemeterBlockfrostProvider.prototype, "getFullTransactionDetails")
+      .mockResolvedValue(null);
+    try {
+      const sdk = await FireblocksCardanoRawSDK.createInstance({
+        ...baseConfig,
+        chainProvider: {
+          type: "demeter",
+          baseUrl: "https://example.invalid",
+          apiKey: "fixture-key",
+        },
+      });
+      await expect(sdk.getFullTransactionDetails("a".repeat(64))).resolves.toBeNull();
+      expect(lookup).toHaveBeenCalledWith("a".repeat(64));
+    } finally {
+      lookup.mockRestore();
+    }
   });
 });

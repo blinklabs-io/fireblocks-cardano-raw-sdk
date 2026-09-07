@@ -1,4 +1,5 @@
 export * from "./cardano.js";
+export * from "./chain-queries.js";
 export * from "./config.js";
 export * from "./errorHandler.js";
 export * from "./fireblocks.js";

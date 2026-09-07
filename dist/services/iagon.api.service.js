@@ -5,6 +5,7 @@ import { ErrorHandler } from "../utils/errorHandler.js";
 import { decodeAssetName } from "../utils/general.js";
 import { Logger } from "../utils/logger.js";
 import { iagonBaseUrl } from "../constants.js";
+import { IagonQueries } from "./iagon.queries.js";
 // Zod schemas for critical Iagon responses
 const utxoDataSchema = z.object({
     transaction_id: z.string(),
@@ -41,6 +42,7 @@ const transferResponseSchema = z.object({
 });
 import { Networks, SdkApiError, ChainProviderCapability, } from "../types/index.js";
 export class IagonApiService {
+    queries = new IagonQueries(this);
     kind = "iagon";
     capabilities = new Set(Object.values(ChainProviderCapability));
     logger = new Logger("services:iagon-api-service");

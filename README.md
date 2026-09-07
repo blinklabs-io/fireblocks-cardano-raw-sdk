@@ -50,6 +50,75 @@ The shared core contract covers provider health, address balance, UTxOs,
 current slot, binary transaction submission, and confirmation by hash. The SDK
 checks provider capabilities before invoking an extended operation.
 
+### Verified transfer-boundary checks
+
+Demeter wallet scans are bounded, reject duplicate outputs and malformed asset
+units, and fail if a later page disappears. Authenticated requests do not follow
+redirects. Transient reads have bounded retries; transaction POSTs are not blindly
+retried. The shared submission helper checks the returned hash against the local
+body hash. An ambiguous submission is reconciled only if that exact hash is
+already visible on-chain; otherwise it reports an unknown outcome.
+
+`getTransactionDetails()` remains a lightweight polling lookup (`utxosComplete:
+false` for Demeter). `getFullTransactionDetails()` additionally fetches actual
+inputs/outputs, preserving reference/collateral flags and failing on unavailable
+UTxO data. It is a separate optional provider operation, not general history support.
+
+Demeter SDK ADA, CNT, multi-token and consolidation paths now fetch a fresh
+network-bound protocol snapshot for each build. Fees, output-byte cost and maximum
+transaction size use that snapshot. Direct builder callers must pass
+`protocolParameters` to opt in; omission retains legacy IAGON constants. Snapshots
+expire after five minutes. Fee sizing still conservatively estimates key-witness
+overhead; this is not a Plutus execution-cost estimator. Staking/governance builders
+and the legacy standalone `calculateTransactionFee()` utility are not migrated.
+
+Local regressions live in `src/__tests__/services/demeter-safety.test.ts` and
+`src/__tests__/utils/transfer-verification.test.ts`. Live Preview acceptance logs
+are maintained in the companion POC's `proofs/qa-compatibility/` directory.
+
+### Indexed reads: history, assets, accounts and pools
+
+`sdk.getChainQueries()` exposes the same narrow read interface for either selected
+provider. Standalone applications can use `provider.queries` without initializing
+Fireblocks. This does not change the old IAGON-specific SDK methods or enable
+Demeter staking/governance transactions.
+
+```typescript
+const reads = sdk.getChainQueries(); // after SDK initialization
+const page = await reads.addressHistory(address, { count: 10, details: "full" });
+const asset = await reads.assetDetails(policyId + assetNameHex);
+const account = await reads.stakeAccount(stakeAddress);
+const addresses = await reads.stakeAddresses(stakeAddress, { page: 1, count: 25 });
+const rewards = await reads.stakeRewards(stakeAddress, { page: 1, count: 25 });
+const metadata = await reads.poolMetadata(poolId);
+const delegators = await reads.poolDelegators(poolId, { page: 1, count: 25 });
+```
+
+- `supportedOperations` lists individual implemented read operations, not a
+  guarantee that every deployment implements them. A Demeter HTTP 501 becomes
+  `ChainReadUnsupportedError` and is not retried.
+- Pages use `page`/`count`; count is 1–100 and page is 1–1000. Full-history pages
+  are limited to 25 and hydrate transactions sequentially. A missing or
+  inconsistent transaction fails the page, not a partial success.
+- Demeter history is newest-first. Other list ordering is provider-defined.
+  Demeter totals are `null`; `nextPage` on a full page is a continuation to try,
+  not proof of more results. `collectChainPages()` provides bounded collection
+  with duplicate detection. Empty/short pages do not prove complete archive retention.
+- `fromBlock`/`toBlock` are **block heights**, supported only by the Demeter
+  query adapter. A `fromSlot` property is rejected rather than silently reinterpreted;
+  IAGON's existing slot-based history API remains separate.
+- Supply/reward/stake amounts are decimal strings. Combined mint/burn counts
+  are not split, controlled ADA is not called active stake, and unknown
+  registration/epoch/metadata fields stay `null`. Metadata is untrusted data;
+  escape it when displaying it and do not automatically follow its URLs.
+
+This covers paged per-address history, basic asset information, account/reward
+reads and individual pool metadata/delegators. It does not add vault-wide history,
+credential ownership inference, rich webhook metadata enrichment, account asset
+aggregation, registration/delegation history, pool aggregates/validation, or
+staking/governance writes. Both provider adapters have local HTTP contract tests;
+live acceptance is Demeter Preview only, not live IAGON or Fireblocks.
+
 ## Installation
 
 Node.js 20 or newer is required.

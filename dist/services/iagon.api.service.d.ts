@@ -1,5 +1,7 @@
+import type { ChainQueries } from "../types/chain-queries.js";
 import { BalanceResponse, getBalanceByAddressOpts, getBalanceByCredentialOpts, getBalanceByStakeKeyOpts, GroupedBalanceResponse, DetailedTxHistoryResponse, TransferResponse, UtxoIagonResponse, GetTransactionHistoryOpts, TransactionDetailsResponse, Networks, StakeAccountRewardsResponse, StakeAccountInfoResponse, CurrentEpochResponse, PoolInfoResponse, PoolMetadataResponse, PoolDelegatorsResponse, PoolDelegatorsListResponse, PoolBlocksResponse, DelegationHistoryResponse, AccountAssetsResponse, RegistrationHistoryResponse, WithdrawalHistoryResponse, PaymentAddressesResponse, HealthStatusResponse, AssetInfoResponse, CardanoDataProvider, ChainProviderCapability } from "../types/index.js";
 export declare class IagonApiService implements CardanoDataProvider {
+    readonly queries: ChainQueries;
     readonly kind: "iagon";
     readonly capabilities: Set<ChainProviderCapability>;
     private readonly logger;

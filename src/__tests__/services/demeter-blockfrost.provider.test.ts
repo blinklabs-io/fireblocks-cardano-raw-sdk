@@ -250,7 +250,7 @@ describe("DemeterBlockfrostProvider", () => {
 
   it("maps transaction confirmation and returns null while absent", async () => {
     handler = (_request, response) => json(response, 404, { message: "not found" });
-    await expect(provider().getTransactionDetails("pending")).resolves.toBeNull();
+    await expect(provider().getTransactionDetails("a".repeat(64))).resolves.toBeNull();
 
     handler = (_request, response) =>
       json(response, 200, {
@@ -262,7 +262,7 @@ describe("DemeterBlockfrostProvider", () => {
         fees: "170000",
         size: 200,
       });
-    await expect(provider().getTransactionDetails("confirmed")).resolves.toMatchObject({
+    await expect(provider().getTransactionDetails("e".repeat(64))).resolves.toMatchObject({
       success: true,
       data: {
         tx_hash: "e".repeat(64),

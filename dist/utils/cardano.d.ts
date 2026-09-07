@@ -1,6 +1,8 @@
 import { Address, TransactionInput, TransactionOutput, TransactionBody, Transaction } from "@emurgo/cardano-serialization-lib-nodejs";
-import { CardanoDataProvider } from "../types/providers.js";
+import { CardanoDataProvider, ProtocolParameterSnapshot } from "../types/providers.js";
 import { CntTransactionOutputsParams, MultiTokenTransactionOutputsParams, ConsolidationTransactionOutputParams, UtxoData, fetchAndSelectUtxosForCntParams, fetchAndSelectUtxosForAdaParams, fetchAndSelectUtxosForMultiTokenParams } from "../types/index.js";
+/** Reject expired or malformed snapshots; callers must also bind the network to their intent. */
+export declare const validateProtocolParameters: (parameters: ProtocolParameterSnapshot, expectedMagic?: number) => void;
 /**
  * Calculate the minimum required lovelace for a UTXO based on number of policies
  *
@@ -93,6 +95,7 @@ export declare const fetchAndSelectUtxosForAda: (params: fetchAndSelectUtxosForA
     release: () => void;
 }>;
 export interface createAdaTransactionOutputsParams {
+    protocolParameters?: ProtocolParameterSnapshot;
     lovelaceAmount: number;
     fee: number;
     recipientAddress: Address;

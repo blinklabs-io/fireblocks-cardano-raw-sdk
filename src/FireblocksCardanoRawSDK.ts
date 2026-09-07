@@ -9,6 +9,7 @@ import {
 
 import {
   Logger,
+  validateProtocolParameters,
   buildAdaTransactionWithCalculatedFee,
   fetchAndSelectUtxosForAda,
   fetchAndSelectUtxosForMultiToken,
@@ -155,6 +156,12 @@ interface PreparedAdaTransaction {
 }
 
 export class FireblocksCardanoRawSDK {
+  /** Narrow indexed reads. Broad legacy capability flags do not imply these operations, or vice versa. */
+  public getChainQueries() {
+    if (!this.chainProvider.queries)
+      throw new Error(`Provider '${this.chainProvider.kind}' has no indexed-query adapter`);
+    return this.chainProvider.queries;
+  }
   private readonly fireblocksService: FireblocksService;
   private readonly chainProvider: CardanoDataProvider;
   private readonly iagonApiService?: IagonApiService;
@@ -289,6 +296,7 @@ export class FireblocksCardanoRawSDK {
           apiKey: resolvedProviderConfig.apiKey,
           maxRetries: resolvedProviderConfig.maxRetries,
           pageSize: resolvedProviderConfig.pageSize,
+          maxPages: resolvedProviderConfig.maxPages,
         });
       }
       const stakingService = iagonApiService
@@ -721,6 +729,30 @@ export class FireblocksCardanoRawSDK {
   ): Promise<TransactionDetailsResponse | null> => {
     return await this.chainProvider.getTransactionDetails(hash);
   };
+
+  /** Explicit full-details read; lightweight polling is kept separate. */
+  public getFullTransactionDetails = async (
+    hash: string
+  ): Promise<TransactionDetailsResponse | null> => {
+    if (!this.chainProvider.getFullTransactionDetails) {
+      throw new Error(
+        `Provider '${this.chainProvider.kind}' does not implement getFullTransactionDetails; use its legacy transaction details API`
+      );
+    }
+    return this.chainProvider.getFullTransactionDetails(hash);
+  };
+
+  /** Fresh protocol snapshot for Demeter transfers; legacy IAGON keeps its existing defaults. */
+  private async transferProtocolParameters() {
+    if (this.chainProvider.kind !== "demeter") return undefined;
+    if (!this.chainProvider.getProtocolParameters)
+      throw new Error("Demeter protocol parameters are required");
+    const parameters = await this.chainProvider.getProtocolParameters();
+    const expectedMagic =
+      this.network === Networks.MAINNET ? 764824073 : this.network === Networks.PREVIEW ? 2 : 1;
+    validateProtocolParameters(parameters, expectedMagic);
+    return parameters;
+  }
 
   /**
    * Get UTXOs for a vault account address
@@ -1402,6 +1434,7 @@ export class FireblocksCardanoRawSDK {
         tokenName,
         transferAmount: requiredTokenAmount,
         selectedUtxos,
+        protocolParameters: await this.transferProtocolParameters(),
       },
       txInputs,
       ttl,
@@ -1657,6 +1690,7 @@ export class FireblocksCardanoRawSDK {
         recipientAddress: recipientAddrAda,
         senderAddress: senderAddrAda,
         selectedUtxos,
+        protocolParameters: await this.transferProtocolParameters(),
       },
       txInputs,
       ttl,
@@ -2072,7 +2106,22 @@ export class FireblocksCardanoRawSDK {
         );
         const signedTransaction = signingResult.signedTransaction;
         try {
-          const txHash = await submitTransaction(this.chainProvider, signedTransaction);
+          const txHash = await submitTransaction(this.chainProvider, signedTransaction).catch(
+            (error: unknown) => {
+              if (
+                signingResult.governance &&
+                error instanceof SdkApiError &&
+                error.errorType === "SubmissionHashMismatch"
+              ) {
+                throw new SdkApiError(
+                  "Demeter submission hash does not match the Fireblocks-signed body",
+                  502,
+                  "GovernanceCorrelationError"
+                );
+              }
+              throw error;
+            }
+          );
           const demeterSubmissionHashMatchesBody = signingResult.governance
             ? txHash.toLowerCase() === signingResult.governance.transactionBodyHash.toLowerCase()
             : undefined;
@@ -2271,6 +2320,7 @@ export class FireblocksCardanoRawSDK {
         senderAddress: senderAddrMT,
         selectedUtxos,
         minRecipientLovelace: lovelaceAmount,
+        protocolParameters: await this.transferProtocolParameters(),
       },
       txInputs,
       ttl,
@@ -2496,7 +2546,11 @@ export class FireblocksCardanoRawSDK {
 
       const senderAddrConsolidate = Address.from_bech32(senderAddress);
       const { outputs, fee, txBody } = buildConsolidationTransactionWithCalculatedFee(
-        { senderAddress: senderAddrConsolidate, selectedUtxos: utxos },
+        {
+          senderAddress: senderAddrConsolidate,
+          selectedUtxos: utxos,
+          protocolParameters: await this.transferProtocolParameters(),
+        },
         txInputs,
         ttl,
         WITNESS_COUNT_PAYMENT_KEY_ONLY
@@ -2559,7 +2613,11 @@ export class FireblocksCardanoRawSDK {
 
         const senderAddrObj = Address.from_bech32(senderAddress);
         const { fee, txBody } = buildConsolidationTransactionWithCalculatedFee(
-          { senderAddress: senderAddrObj, selectedUtxos: batchUtxos },
+          {
+            senderAddress: senderAddrObj,
+            selectedUtxos: batchUtxos,
+            protocolParameters: await this.transferProtocolParameters(),
+          },
           txInputs,
           ttl,
           WITNESS_COUNT_PAYMENT_KEY_ONLY
