@@ -5,7 +5,7 @@
 **Build and sign Cardano transactions with Fireblocks, then choose IAGON or
 Demeter for Cardano chain access.**
 
-[![CI](https://github.com/verbotenj/cardano-raw-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/verbotenj/cardano-raw-sdk/actions/workflows/ci.yml)
+[![CI](https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/actions/workflows/ci.yml)
 [![Node 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![Providers](https://img.shields.io/badge/provider-IAGON%20%7C%20Demeter-6f42c1)](#provider-wiring)
 
@@ -124,8 +124,8 @@ live acceptance is Demeter Preview only, not live IAGON or Fireblocks.
 Node.js 20 or newer is required.
 
 ```bash
-git clone https://github.com/verbotenj/cardano-raw-sdk.git
-cd cardano-raw-sdk
+git clone https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk.git
+cd fireblocks-cardano-raw-sdk
 npm ci
 npm run quality
 ```
@@ -137,7 +137,7 @@ does not execute build tools:
 ```json
 {
   "dependencies": {
-    "cardano-raw-sdk": "https://github.com/verbotenj/cardano-raw-sdk/archive/COMMIT_SHA.tar.gz"
+    "cardano-raw-sdk": "https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/archive/COMMIT_SHA.tar.gz"
   }
 }
 ```

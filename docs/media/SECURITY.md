@@ -9,7 +9,7 @@ is not an audited custody product and carries no production-security warranty.
 
 Do not open a public issue containing exploit details, credentials, wallet
 material, or signed transactions. Use GitHub's private vulnerability-reporting
-feature for `verbotenj/cardano-raw-sdk`. Revoke any credential that might have
+feature for `blinklabs-io/fireblocks-cardano-raw-sdk`. Revoke any credential that might have
 been disclosed before sending the report.
 
 ## Deployment boundary
