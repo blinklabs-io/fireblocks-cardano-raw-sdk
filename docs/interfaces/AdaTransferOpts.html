@@ -12,7 +12,7 @@
 <h1>Interface AdaTransferOpts</h1></div>
 <div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">AdaTransferOpts</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#governance">governance</a><span class="tsd-signature-symbol">?:</span> <a href="FireblocksGovernanceRequirements.html" class="tsd-signature-type tsd-kind-interface">FireblocksGovernanceRequirements</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#index">index</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#lovelaceamount">lovelaceAmount</a><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#recipientaddress">recipientAddress</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#recipientindex">recipientIndex</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#recipientvaultaccountid">recipientVaultAccountId</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/verbotenj/cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L101">src/types/iagon/general.ts:101</a></li></ul></aside>
+<li>Defined in <a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L101">src/types/iagon/general.ts:101</a></li></ul></aside>
 <section class="tsd-panel-group tsd-index-group">
 <section class="tsd-panel tsd-index-panel">
 <details class="tsd-index-content tsd-accordion" open><summary class="tsd-accordion-summary tsd-index-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
@@ -36,42 +36,42 @@
 <div class="tsd-comment tsd-typography"><p>Enable strict Fireblocks RAW-signing governance evidence for locally built ADA.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/verbotenj/cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L113">src/types/iagon/general.ts:113</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L113">src/types/iagon/general.ts:113</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="index"><code class="tsd-tag">Optional</code><span>index</span><a href="#index" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">index</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
 <div class="tsd-comment tsd-typography"><p>Source address index on the sending vault (default: 0)</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/verbotenj/cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L103">src/types/iagon/general.ts:103</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L103">src/types/iagon/general.ts:103</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="lovelaceamount"><span>lovelace<wbr/>Amount</span><a href="#lovelaceamount" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">lovelaceAmount</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span></div>
 <div class="tsd-comment tsd-typography"><p>Amount to send in lovelace (1 ADA = 1,000,000 lovelace)</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/verbotenj/cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L111">src/types/iagon/general.ts:111</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L111">src/types/iagon/general.ts:111</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="recipientaddress"><code class="tsd-tag">Optional</code><span>recipient<wbr/>Address</span><a href="#recipientaddress" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">recipientAddress</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span></div>
 <div class="tsd-comment tsd-typography"><p>Recipient bech32 Cardano address (mutually exclusive with recipientVaultAccountId)</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/verbotenj/cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L105">src/types/iagon/general.ts:105</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L105">src/types/iagon/general.ts:105</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="recipientindex"><code class="tsd-tag">Optional</code><span>recipient<wbr/>Index</span><a href="#recipientindex" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">recipientIndex</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
 <div class="tsd-comment tsd-typography"><p>Address index on the recipient vault (default: 0)</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/verbotenj/cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L109">src/types/iagon/general.ts:109</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L109">src/types/iagon/general.ts:109</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="recipientvaultaccountid"><code class="tsd-tag">Optional</code><span>recipient<wbr/>Vault<wbr/>Account<wbr/>Id</span><a href="#recipientvaultaccountid" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">recipientVaultAccountId</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span></div>
 <div class="tsd-comment tsd-typography"><p>Recipient vault account ID (mutually exclusive with recipientAddress)</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/verbotenj/cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L107">src/types/iagon/general.ts:107</a></li></ul></aside></section></section></details></div>
+<li>Defined in <a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/blob/main/src/types/iagon/general.ts#L107">src/types/iagon/general.ts:107</a></li></ul></aside></section></section></details></div>
 <div class="col-sidebar">
 <div class="page-menu">
 <div class="tsd-navigation settings">

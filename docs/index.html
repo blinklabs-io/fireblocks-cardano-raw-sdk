@@ -12,7 +12,7 @@
 <h1 id="fireblocks-cardano-raw-sdk" class="tsd-anchor-link">Fireblocks Cardano Raw SDK<a href="#fireblocks-cardano-raw-sdk" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h1>
 <p><strong>Build and sign Cardano transactions with Fireblocks, then choose IAGON or
 Demeter for Cardano chain access.</strong></p>
-<p><a href="https://github.com/verbotenj/cardano-raw-sdk/actions/workflows/ci.yml"><img src="https://github.com/verbotenj/cardano-raw-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<p><a href="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/actions/workflows/ci.yml"><img src="https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 <a href="package.json"><img src="https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&amp;logoColor=white" alt="Node 20+"></a>
 <a href="#provider-wiring"><img src="https://img.shields.io/badge/provider-IAGON%20%7C%20Demeter-6f42c1" alt="Providers"></a></p>
 <p><a href="https://github.com/verbotenj/cardano-raw-sdk-demeter-poc">Runnable Demeter POC</a> ·
@@ -97,13 +97,13 @@ staking/governance writes. Both provider adapters have local HTTP contract tests
 live acceptance is Demeter Preview only, not live IAGON or Fireblocks.</p>
 <h2 id="installation" class="tsd-anchor-link">Installation<a href="#installation" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
 <p>Node.js 20 or newer is required.</p>
-<pre><code class="bash"><span class="hl-4">git</span><span class="hl-0"> </span><span class="hl-8">clone</span><span class="hl-0"> </span><span class="hl-8">https://github.com/verbotenj/cardano-raw-sdk.git</span><br/><span class="hl-4">cd</span><span class="hl-0"> </span><span class="hl-8">cardano-raw-sdk</span><br/><span class="hl-4">npm</span><span class="hl-0"> </span><span class="hl-8">ci</span><br/><span class="hl-4">npm</span><span class="hl-0"> </span><span class="hl-8">run</span><span class="hl-0"> </span><span class="hl-8">quality</span>
+<pre><code class="bash"><span class="hl-4">git</span><span class="hl-0"> </span><span class="hl-8">clone</span><span class="hl-0"> </span><span class="hl-8">https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk.git</span><br/><span class="hl-4">cd</span><span class="hl-0"> </span><span class="hl-8">fireblocks-cardano-raw-sdk</span><br/><span class="hl-4">npm</span><span class="hl-0"> </span><span class="hl-8">ci</span><br/><span class="hl-4">npm</span><span class="hl-0"> </span><span class="hl-8">run</span><span class="hl-0"> </span><span class="hl-8">quality</span>
 </code><button type="button">Copy</button></pre>
 
 <p>This fork is not published to npm. An application can pin an immutable HTTPS
 archive. The repository tracks compiled <code>dist/</code> files so archive installation
 does not execute build tools:</p>
-<pre><code class="json"><span class="hl-0">{</span><br/><span class="hl-0">  </span><span class="hl-9">&quot;dependencies&quot;</span><span class="hl-0">: {</span><br/><span class="hl-0">    </span><span class="hl-9">&quot;cardano-raw-sdk&quot;</span><span class="hl-0">: </span><span class="hl-8">&quot;https://github.com/verbotenj/cardano-raw-sdk/archive/COMMIT_SHA.tar.gz&quot;</span><br/><span class="hl-0">  }</span><br/><span class="hl-0">}</span>
+<pre><code class="json"><span class="hl-0">{</span><br/><span class="hl-0">  </span><span class="hl-9">&quot;dependencies&quot;</span><span class="hl-0">: {</span><br/><span class="hl-0">    </span><span class="hl-9">&quot;cardano-raw-sdk&quot;</span><span class="hl-0">: </span><span class="hl-8">&quot;https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/archive/COMMIT_SHA.tar.gz&quot;</span><br/><span class="hl-0">  }</span><br/><span class="hl-0">}</span>
 </code><button type="button">Copy</button></pre>
 
 <p>Import all public values and types from the package root:</p>
