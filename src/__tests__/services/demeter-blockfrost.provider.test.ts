@@ -57,6 +57,13 @@ describe("DemeterBlockfrostProvider", () => {
     expect(() => provider({ maxRetries: -1 })).toThrow("maxRetries");
     expect(() => provider({ maxRetries: 11 })).toThrow("maxRetries");
     expect(() => provider({ pageSize: 0 })).toThrow("pageSize");
+    expect(
+      () =>
+        new DemeterBlockfrostProvider({
+          baseUrl: `${baseUrl}/${"/".repeat(10_000)}invalid`,
+          apiKey: "key",
+        })
+    ).not.toThrow();
     expect(provider().capabilities).toEqual(new Set([ChainProviderCapability.CORE]));
   });
 

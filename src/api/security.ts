@@ -1,13 +1,17 @@
-import { createHash, timingSafeEqual } from "crypto";
+import { timingSafeEqual } from "crypto";
 import { NextFunction, Request, RequestHandler, Response } from "express";
 
 export const MIN_SERVER_API_KEY_BYTES = 32;
 
-const digest = (value: string): Buffer => createHash("sha256").update(value).digest();
-
 /** Compare credentials without leaking a useful character-by-character timing signal. */
-export const credentialsMatch = (provided: string, expected: string): boolean =>
-  timingSafeEqual(digest(provided), digest(expected));
+export const credentialsMatch = (provided: string, expected: string): boolean => {
+  const providedBytes = Buffer.from(provided, "utf8");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  // The configured key length is not secret; compare equal-length keys in constant time.
+  return (
+    providedBytes.length === expectedBytes.length && timingSafeEqual(providedBytes, expectedBytes)
+  );
+};
 
 export const extractApiCredential = (req: Pick<Request, "headers">): string | undefined => {
   const apiKey = req.headers["x-api-key"];
@@ -15,8 +19,19 @@ export const extractApiCredential = (req: Pick<Request, "headers">): string | un
 
   const authorization = req.headers.authorization;
   if (typeof authorization !== "string") return undefined;
-  const match = /^Bearer\s+(.+)$/i.exec(authorization);
-  return match?.[1];
+  if (authorization.slice(0, 6).toLowerCase() !== "bearer") return undefined;
+  if (!/\s/.test(authorization.charAt(6))) return undefined;
+  let credentialStart = 7;
+  while (
+    credentialStart < authorization.length &&
+    /\s/.test(authorization.charAt(credentialStart))
+  ) {
+    credentialStart++;
+  }
+  const credential = authorization.slice(credentialStart);
+  return credential && !credential.includes("\n") && !credential.includes("\r")
+    ? credential
+    : undefined;
 };
 
 export const validateServerApiKey = (apiKey: string | undefined): string => {

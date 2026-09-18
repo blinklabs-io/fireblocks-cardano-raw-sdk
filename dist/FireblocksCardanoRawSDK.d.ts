@@ -49,7 +49,7 @@ export declare class FireblocksCardanoRawSDK {
         iagonApiKey?: string;
         /** Asset metadata cache TTL in milliseconds (default: 1 hour) */
         assetCacheTTL?: number;
-        /** Disable SSL certificate verification (use only in development) */
+        /** @deprecated TLS certificate verification cannot be disabled. */
         disableSslVerification?: boolean;
     }) => Promise<FireblocksCardanoRawSDK>;
     checkProviderHealth: () => Promise<HealthStatusResponse>;

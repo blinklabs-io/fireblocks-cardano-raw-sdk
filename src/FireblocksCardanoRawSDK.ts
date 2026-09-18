@@ -257,7 +257,7 @@ export class FireblocksCardanoRawSDK {
     iagonApiKey?: string;
     /** Asset metadata cache TTL in milliseconds (default: 1 hour) */
     assetCacheTTL?: number;
-    /** Disable SSL certificate verification (use only in development) */
+    /** @deprecated TLS certificate verification cannot be disabled. */
     disableSslVerification?: boolean;
   }): Promise<FireblocksCardanoRawSDK> => {
     try {
@@ -606,7 +606,7 @@ export class FireblocksCardanoRawSDK {
    */
   private logAndRethrow(context: string, error: unknown): never {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    this.logger.error(`${context} failed: ${errorMessage}`);
+    this.logger.error(`${context} failed`);
     if (error instanceof Error) throw error;
     throw new Error(`${context}Failed: ${errorMessage}`);
   }

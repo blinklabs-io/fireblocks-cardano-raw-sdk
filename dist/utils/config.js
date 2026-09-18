@@ -58,7 +58,7 @@ const resolveKeyContent = (key) => {
 // Validate base path
 const validateBasePath = (basePath) => {
     if (basePath && !Object.values(BasePath).includes(basePath)) {
-        logger.warn(`Invalid BASE_PATH: ${basePath}. Must be one of: ${Object.values(BasePath).join(", ")}`);
+        logger.warn(`Invalid BASE_PATH. Must be one of: ${Object.values(BasePath).join(", ")}`);
     }
     return basePath || BasePath.US;
 };

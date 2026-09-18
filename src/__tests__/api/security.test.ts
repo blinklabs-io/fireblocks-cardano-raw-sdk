@@ -1,4 +1,5 @@
 import express, { Request } from "express";
+import { rateLimit } from "express-rate-limit";
 import request from "supertest";
 import {
   allowSignedWebhook,
@@ -12,6 +13,7 @@ describe("HTTP server security", () => {
   it("accepts an exact credential and rejects a different credential", () => {
     expect(credentialsMatch("a".repeat(32), "a".repeat(32))).toBe(true);
     expect(credentialsMatch("b".repeat(32), "a".repeat(32))).toBe(false);
+    expect(credentialsMatch("a".repeat(31), "a".repeat(32))).toBe(false);
   });
 
   it("reads x-api-key before a Bearer credential", () => {
@@ -29,6 +31,18 @@ describe("HTTP server security", () => {
         "headers"
       >)
     ).toBe("test-key");
+    expect(
+      extractApiCredential({ headers: { authorization: "BEARER\t  test-key" } } as Pick<
+        Request,
+        "headers"
+      >)
+    ).toBe("test-key");
+    expect(
+      extractApiCredential({ headers: { authorization: `Bearer ${" ".repeat(10_000)}\n` } } as Pick<
+        Request,
+        "headers"
+      >)
+    ).toBeUndefined();
   });
 
   it("rejects a missing or short server API key", () => {
@@ -45,6 +59,7 @@ describe("HTTP server security", () => {
   it("protects API routes while leaving the signed webhook boundary separate", async () => {
     const key = "s".repeat(32);
     const app = express();
+    app.use(rateLimit({ windowMs: 60_000, limit: 100 }));
     app.use("/api", protectApi(key));
     app.get("/api/balance", (_req, res) => res.json({ ok: true }));
     app.post("/api/webhook", (_req, res) => res.json({ signatureCheck: "controller" }));
@@ -61,5 +76,16 @@ describe("HTTP server security", () => {
     await request(app).post("/api/webhook").expect(200, {
       signatureCheck: "controller",
     });
+  });
+
+  it("rate limits repeated requests before authentication", async () => {
+    const app = express();
+    app.use(rateLimit({ windowMs: 60_000, limit: 2 }));
+    app.use("/api", protectApi("s".repeat(32)));
+    app.get("/api/balance", (_req, res) => res.json({ ok: true }));
+
+    await request(app).get("/api/balance").expect(401);
+    await request(app).get("/api/balance").expect(401);
+    await request(app).get("/api/balance").expect(429);
   });
 });

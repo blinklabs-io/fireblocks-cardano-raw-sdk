@@ -59,6 +59,7 @@ export type ChainProviderConfig =
       type: "iagon";
       apiKey: string;
       assetCacheTTL?: number;
+      /** @deprecated TLS certificate verification cannot be disabled. */
       disableSslVerification?: boolean;
     }
   | {

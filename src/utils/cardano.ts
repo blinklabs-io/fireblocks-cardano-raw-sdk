@@ -679,7 +679,7 @@ export const submitTransaction = async (
  * Module-private helper - not exported.
  */
 const collectAllAssets = (utxos: UtxoData[]): Record<string, number> => {
-  const result: Record<string, number> = {};
+  const result: Record<string, number> = Object.create(null);
   for (const utxo of utxos) {
     if (utxo.value.assets) {
       for (const [assetUnit, amount] of Object.entries(utxo.value.assets)) {
@@ -700,10 +700,10 @@ const collectAllAssets = (utxos: UtxoData[]): Record<string, number> => {
 const groupAssetsByPolicy = (
   assets: Record<string, number>
 ): Record<string, Record<string, number>> => {
-  const result: Record<string, Record<string, number>> = {};
+  const result: Record<string, Record<string, number>> = Object.create(null);
   for (const [assetUnit, amount] of Object.entries(assets)) {
     const [policyId, tokenNameHex] = assetUnit.split(".");
-    if (!result[policyId]) result[policyId] = {};
+    if (!result[policyId]) result[policyId] = Object.create(null);
     result[policyId][tokenNameHex] = amount;
   }
   return result;
@@ -721,6 +721,21 @@ const buildMultiAssetFromGrouped = (
     ([, tokens]) => Object.keys(tokens).length > 0
   );
   if (nonEmpty.length === 0) return null;
+
+  for (const [policyId, tokens] of nonEmpty) {
+    if (!/^[0-9a-fA-F]{56}$/.test(policyId)) {
+      throw new Error("Invalid token policy ID");
+    }
+    for (const tokenNameHex of Object.keys(tokens)) {
+      if (
+        tokenNameHex.length > 64 ||
+        tokenNameHex.length % 2 !== 0 ||
+        !/^[0-9a-fA-F]*$/.test(tokenNameHex)
+      ) {
+        throw new Error("Invalid token name hex");
+      }
+    }
+  }
 
   const multiAsset = MultiAsset.new();
   for (const [policyId, tokens] of nonEmpty) {
@@ -1169,9 +1184,10 @@ export const createMultiTokenTransactionOutputs = (
   );
 
   // Build recipient MultiAsset (group token specs by policy)
-  const recipientAssetsByPolicy: Record<string, Record<string, number>> = {};
+  const recipientAssetsByPolicy: Record<string, Record<string, number>> = Object.create(null);
   for (const t of tokens) {
-    if (!recipientAssetsByPolicy[t.tokenPolicyId]) recipientAssetsByPolicy[t.tokenPolicyId] = {};
+    if (!recipientAssetsByPolicy[t.tokenPolicyId])
+      recipientAssetsByPolicy[t.tokenPolicyId] = Object.create(null);
     recipientAssetsByPolicy[t.tokenPolicyId][t.tokenName] =
       (recipientAssetsByPolicy[t.tokenPolicyId][t.tokenName] || 0) + t.amount;
   }
@@ -1194,7 +1210,7 @@ export const createMultiTokenTransactionOutputs = (
 
   // Change tokens: all input tokens minus what the recipient receives
   const allInputTokens = collectAllAssets(selectedUtxos);
-  const changeTokensFlat: Record<string, number> = {};
+  const changeTokensFlat: Record<string, number> = Object.create(null);
   for (const [assetUnit, amount] of Object.entries(allInputTokens)) {
     const [policyId, tokenNameHex] = assetUnit.split(".");
     const transferred = recipientAssetsByPolicy[policyId]?.[tokenNameHex] ?? 0;

@@ -393,6 +393,8 @@ groups with Fireblocks policy.</li>
 <li>Use distinct credentials and vaults for Preview, Preprod, and Mainnet.</li>
 <li>Do not accept a caller-supplied provider URL in a request; provider endpoints
 are trusted startup configuration.</li>
+<li>TLS certificate verification is mandatory for IAGON requests, including in
+development. The legacy <code>disableSslVerification</code> option now throws if enabled.</li>
 <li>Review the decoded transaction before signing. A provider supplies untrusted
 chain data and must never decide the business intent.</li>
 <li>Correlate <code>externalTxId</code>, Fireblocks transaction ID, transaction-body hash,

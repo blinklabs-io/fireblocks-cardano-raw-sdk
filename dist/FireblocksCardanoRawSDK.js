@@ -294,7 +294,7 @@ export class FireblocksCardanoRawSDK {
      */
     logAndRethrow(context, error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        this.logger.error(`${context} failed: ${errorMessage}`);
+        this.logger.error(`${context} failed`);
         if (error instanceof Error)
             throw error;
         throw new Error(`${context}Failed: ${errorMessage}`);

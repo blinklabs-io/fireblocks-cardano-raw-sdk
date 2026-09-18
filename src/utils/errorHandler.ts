@@ -19,16 +19,13 @@ export class ErrorHandler {
       const status = error.response?.status;
       const data = error.response?.data;
 
-      // Log detailed error information
+      // Provider response bodies and request URLs may contain credentials or signed payloads.
       this.logger.error(`Error ${context}`);
       this.logger.error("Status:", status);
-      this.logger.error("Response Data:", data);
-      this.logger.error("Request URL:", error.config?.url);
 
       // Log additional axios error details for non-response errors
       if (!error.response) {
         this.logger.error("Error Code:", error.code);
-        this.logger.error("Error Message:", error.message);
         if (error.request) {
           this.logger.error("Request was made but no response received");
         } else {
@@ -52,7 +49,7 @@ export class ErrorHandler {
       return error;
     }
 
-    this.logger.error(`Unexpected error ${context}:`, error);
+    this.logger.error(`Unexpected error ${context}`);
     return new SdkApiError(
       error instanceof Error ? error.message : `Error ${context}`,
       undefined,

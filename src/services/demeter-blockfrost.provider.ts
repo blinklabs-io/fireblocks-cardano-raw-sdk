@@ -97,7 +97,10 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
   private readonly maxPages: number;
 
   constructor(options: DemeterBlockfrostProviderOptions) {
-    const baseUrl = options.baseUrl?.replace(/\/+$/, "");
+    const configuredUrl = options.baseUrl;
+    let end = configuredUrl?.length ?? 0;
+    while (end > 0 && configuredUrl?.charAt(end - 1) === "/") end--;
+    const baseUrl = configuredUrl?.slice(0, end);
     if (!baseUrl) {
       throw new Error("DEMETER_BLOCKFROST_URL is required");
     }

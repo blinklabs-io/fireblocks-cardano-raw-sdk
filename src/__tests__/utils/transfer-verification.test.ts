@@ -11,6 +11,7 @@ import {
   buildCntTransactionWithCalculatedFee,
   buildMultiTokenTransactionWithCalculatedFee,
   buildConsolidationTransactionWithCalculatedFee,
+  createMultiTokenTransactionOutputs,
   createTransactionInputs,
   submitTransaction,
   validateProtocolParameters,
@@ -93,6 +94,34 @@ const build = (kind: string, protocolParameters?: ProtocolParameterSnapshot) => 
 
 describe("verified transfer construction", () => {
   beforeAll(() => Logger.setLogLevel(LogLevel.NONE));
+  it("does not pollute Object.prototype for a malformed policy ID", () => {
+    try {
+      expect(() =>
+        createMultiTokenTransactionOutputs({
+          tokens: [{ tokenPolicyId: "__proto__", tokenName: "pollutedAsset", amount: 1 }],
+          fee: 200000,
+          recipientAddress: recipient,
+          senderAddress: sender,
+          selectedUtxos,
+        })
+      ).toThrow();
+      expect(Object.hasOwn(Object.prototype, "pollutedAsset")).toBe(false);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, "pollutedAsset");
+    }
+  });
+  it("rejects a valid policy paired with a non-hex token name", () => {
+    expect(() =>
+      createMultiTokenTransactionOutputs({
+        tokens: [{ tokenPolicyId: policy, tokenName: "__proto__", amount: 1 }],
+        fee: 200000,
+        recipientAddress: recipient,
+        senderAddress: sender,
+        selectedUtxos,
+      })
+    ).toThrow("Invalid token name hex");
+    expect(Object.hasOwn(Object.prototype, "__proto__")).toBe(true);
+  });
   it.each(["ADA", "CNT", "multi", "consolidation"])(
     "%s uses supplied fees and returns exactly the fee encoded in its body",
     (kind) => {

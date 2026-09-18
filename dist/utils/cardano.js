@@ -482,7 +482,7 @@ export const submitTransaction = async (chainProvider, signedTx) => {
  * Module-private helper - not exported.
  */
 const collectAllAssets = (utxos) => {
-    const result = {};
+    const result = Object.create(null);
     for (const utxo of utxos) {
         if (utxo.value.assets) {
             for (const [assetUnit, amount] of Object.entries(utxo.value.assets)) {
@@ -500,11 +500,11 @@ const collectAllAssets = (utxos) => {
  * Module-private helper - not exported.
  */
 const groupAssetsByPolicy = (assets) => {
-    const result = {};
+    const result = Object.create(null);
     for (const [assetUnit, amount] of Object.entries(assets)) {
         const [policyId, tokenNameHex] = assetUnit.split(".");
         if (!result[policyId])
-            result[policyId] = {};
+            result[policyId] = Object.create(null);
         result[policyId][tokenNameHex] = amount;
     }
     return result;
@@ -518,6 +518,18 @@ const buildMultiAssetFromGrouped = (assetsByPolicy) => {
     const nonEmpty = Object.entries(assetsByPolicy).filter(([, tokens]) => Object.keys(tokens).length > 0);
     if (nonEmpty.length === 0)
         return null;
+    for (const [policyId, tokens] of nonEmpty) {
+        if (!/^[0-9a-fA-F]{56}$/.test(policyId)) {
+            throw new Error("Invalid token policy ID");
+        }
+        for (const tokenNameHex of Object.keys(tokens)) {
+            if (tokenNameHex.length > 64 ||
+                tokenNameHex.length % 2 !== 0 ||
+                !/^[0-9a-fA-F]*$/.test(tokenNameHex)) {
+                throw new Error("Invalid token name hex");
+            }
+        }
+    }
     const multiAsset = MultiAsset.new();
     for (const [policyId, tokens] of nonEmpty) {
         const policy = ScriptHash.from_hex(policyId);
@@ -815,10 +827,10 @@ export const createMultiTokenTransactionOutputs = (params) => {
     const { tokens, fee, recipientAddress, senderAddress, selectedUtxos, minRecipientLovelace } = params;
     const totalInputLovelace = selectedUtxos.reduce((sum, u) => addSafeQuantity(sum, u.value.lovelace), 0);
     // Build recipient MultiAsset (group token specs by policy)
-    const recipientAssetsByPolicy = {};
+    const recipientAssetsByPolicy = Object.create(null);
     for (const t of tokens) {
         if (!recipientAssetsByPolicy[t.tokenPolicyId])
-            recipientAssetsByPolicy[t.tokenPolicyId] = {};
+            recipientAssetsByPolicy[t.tokenPolicyId] = Object.create(null);
         recipientAssetsByPolicy[t.tokenPolicyId][t.tokenName] =
             (recipientAssetsByPolicy[t.tokenPolicyId][t.tokenName] || 0) + t.amount;
     }
@@ -839,7 +851,7 @@ export const createMultiTokenTransactionOutputs = (params) => {
     const recipientLovelace = Math.max(minRecipientLovelace ?? 0, actualMinRecipient);
     // Change tokens: all input tokens minus what the recipient receives
     const allInputTokens = collectAllAssets(selectedUtxos);
-    const changeTokensFlat = {};
+    const changeTokensFlat = Object.create(null);
     for (const [assetUnit, amount] of Object.entries(allInputTokens)) {
         const [policyId, tokenNameHex] = assetUnit.split(".");
         const transferred = recipientAssetsByPolicy[policyId]?.[tokenNameHex] ?? 0;

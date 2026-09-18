@@ -388,6 +388,8 @@ environments, and require the exact phrase
 - Use distinct credentials and vaults for Preview, Preprod, and Mainnet.
 - Do not accept a caller-supplied provider URL in a request; provider endpoints
   are trusted startup configuration.
+- TLS certificate verification is mandatory for IAGON requests, including in
+  development. The legacy `disableSslVerification` option now throws if enabled.
 - Review the decoded transaction before signing. A provider supplies untrusted
   chain data and must never decide the business intent.
 - Correlate `externalTxId`, Fireblocks transaction ID, transaction-body hash,

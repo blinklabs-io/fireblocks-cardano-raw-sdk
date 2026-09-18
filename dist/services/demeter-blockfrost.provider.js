@@ -61,7 +61,11 @@ export class DemeterBlockfrostProvider {
     pageSize;
     maxPages;
     constructor(options) {
-        const baseUrl = options.baseUrl?.replace(/\/+$/, "");
+        const configuredUrl = options.baseUrl;
+        let end = configuredUrl?.length ?? 0;
+        while (end > 0 && configuredUrl?.charAt(end - 1) === "/")
+            end--;
+        const baseUrl = configuredUrl?.slice(0, end);
         if (!baseUrl) {
             throw new Error("DEMETER_BLOCKFROST_URL is required");
         }

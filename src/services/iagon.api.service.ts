@@ -1,5 +1,4 @@
 import axios from "axios";
-import https from "https";
 import { z } from "zod";
 import { ErrorHandler } from "../utils/errorHandler.js";
 import { decodeAssetName } from "../utils/general.js";
@@ -114,21 +113,9 @@ export class IagonApiService implements CardanoDataProvider {
       );
     }
 
-    // SECURITY: Prevent SSL verification disabling in production
+    // Never disable TLS verification for the provider that supplies signing inputs.
     if (disableSslVerification) {
-      const env = process.env.NODE_ENV || "production";
-
-      if (env === "production") {
-        throw new Error(
-          "SSL verification cannot be disabled in production environment. " +
-            "This is a critical security vulnerability that enables man-in-the-middle attacks."
-        );
-      }
-
-      this.logger.warn(
-        "⚠️  SSL VERIFICATION DISABLED - This should ONLY be used in development with self-signed certificates. " +
-          "NEVER deploy to production with this setting."
-      );
+      throw new Error("SSL verification cannot be disabled for IAGON requests");
     }
 
     this.iagonApiKey = apiKey;
@@ -142,9 +129,6 @@ export class IagonApiService implements CardanoDataProvider {
         Authorization: `Bearer ${this.iagonApiKey}`,
         "Content-Type": "application/json",
       },
-      ...(disableSslVerification && {
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      }),
     });
   }
 
