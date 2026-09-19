@@ -399,10 +399,5 @@ export class DemeterBlockfrostProvider {
             return error.statusCode;
         return error?.response?.status;
     }
-    errorMessage(error) {
-        if (error instanceof Error)
-            return error.message;
-        return String(error);
-    }
 }
 //# sourceMappingURL=demeter-blockfrost.provider.js.map

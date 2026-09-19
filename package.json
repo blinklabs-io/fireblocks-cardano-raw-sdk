@@ -1,13 +1,13 @@
 {
   "name": "cardano-raw-sdk",
-  "version": "0.1.0",
+  "version": "1.4.2",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
   "scripts": {
     "prepare": "npm run build",
     "build": "tsc -p tsconfig.build.json",
-    "build:check": "npm run build && git diff --exit-code -- dist",
+    "build:check": "npm run build && node scripts/check-generated-clean.mjs dist",
     "build:w": "tsc -w",
     "start": "node ./dist/app.js",
     "dev": "concurrently \"npm:build:w\" \"npm:start\"",
@@ -22,7 +22,7 @@
     "poc:mock": "CUSTODY_MODE=mock tsx scripts/run-demeter-poc.ts",
     "poc:fireblocks": "CUSTODY_MODE=fireblocks tsx scripts/run-demeter-poc.ts",
     "docs": "typedoc src",
-    "docs:check": "npm run docs && git diff --exit-code -- docs",
+    "docs:check": "npm run docs && node scripts/check-generated-clean.mjs docs",
     "docs:verify": "node scripts/verify-docs.mjs"
   },
   "keywords": [
@@ -34,7 +34,7 @@
     "ada"
   ],
   "author": "Fireblocks",
-  "license": "UNLICENSED",
+  "license": "ISC",
   "description": "Fireblocks Cardano Raw SDK with selectable IAGON and Demeter Blockfrost providers",
   "devDependencies": {
     "@eslint/js": "^10.0.1",

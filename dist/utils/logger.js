@@ -86,8 +86,12 @@ export class Logger {
         return args.map((arg) => {
             if (typeof arg === "string")
                 return escapeLogText(arg);
-            if (arg instanceof Error)
-                return JSON.stringify({ name: arg.name });
+            if (arg instanceof Error) {
+                return JSON.stringify({
+                    name: escapeLogText(arg.name),
+                    message: escapeLogText(arg.message),
+                });
+            }
             const sanitized = Logger.sanitizeLogs
                 ? sanitizeForLogging(arg, Logger.customSensitiveKeys)
                 : arg;
@@ -103,8 +107,12 @@ export class Logger {
             }
             try {
                 const serialized = JSON.stringify(sanitized, (_key, value) => {
-                    if (value instanceof Error)
-                        return { name: value.name };
+                    if (value instanceof Error) {
+                        return {
+                            name: escapeLogText(value.name),
+                            message: escapeLogText(value.message),
+                        };
+                    }
                     if (typeof value === "bigint")
                         return value.toString();
                     if (typeof value === "function" || typeof value === "symbol") {

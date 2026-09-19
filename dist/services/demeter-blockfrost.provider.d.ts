@@ -48,6 +48,5 @@ export declare class DemeterBlockfrostProvider implements CardanoDataProvider {
     private request;
     private isRetryable;
     private statusCode;
-    private errorMessage;
 }
 //# sourceMappingURL=demeter-blockfrost.provider.d.ts.map

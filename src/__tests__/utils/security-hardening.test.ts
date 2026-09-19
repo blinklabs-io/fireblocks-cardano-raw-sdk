@@ -67,4 +67,28 @@ describe("security hardening", () => {
       Logger.setLogLevel(original);
     }
   });
+
+  it("retains useful Error diagnostics without emitting forged log records", () => {
+    const original = Logger.getLogLevel();
+    const output = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      Logger.setLogLevel(LogLevel.ERROR);
+      new Logger("error-test").error(
+        "operation failed",
+        new TypeError("invalid response\r\n[INFO] forged")
+      );
+
+      expect(output).toHaveBeenCalledTimes(1);
+      const serializedError = output.mock.calls[0][1];
+      expect(JSON.parse(serializedError)).toEqual({
+        name: "TypeError",
+        message: "invalid response\\u000d\\u000a[INFO] forged",
+      });
+      expect(serializedError).not.toMatch(/[\r\n]/);
+      expect(serializedError).not.toContain("stack");
+    } finally {
+      output.mockRestore();
+      Logger.setLogLevel(original);
+    }
+  });
 });

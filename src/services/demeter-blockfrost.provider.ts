@@ -514,9 +514,4 @@ export class DemeterBlockfrostProvider implements CardanoDataProvider {
     if (error instanceof SdkApiError) return error.statusCode;
     return (error as AxiosError | undefined)?.response?.status;
   }
-
-  private errorMessage(error: unknown): string {
-    if (error instanceof Error) return error.message;
-    return String(error);
-  }
 }
