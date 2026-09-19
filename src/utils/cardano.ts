@@ -821,9 +821,25 @@ const convergeTransactionFee = (
     const calculatedFee =
       (parameters?.minFeeA ?? CardanoConstants.MIN_FEE_A) * totalSize +
       (parameters?.minFeeB ?? CardanoConstants.MIN_FEE_B);
-    if (!Number.isSafeInteger(calculatedFee)) throw new Error("Unsafe calculated fee");
-    if (parameters && totalSize > parameters.maxTxSize)
+    const releaseIteration = () => {
+      txBody.free();
+      outputs.forEach((output) => output.free());
+    };
+    if (!Number.isSafeInteger(calculatedFee)) {
+      releaseIteration();
+      throw new Error("Unsafe calculated fee");
+    }
+    if (calculatedFee > CardanoAmounts.MAX_TRANSACTION_FEE_LOVELACE) {
+      releaseIteration();
+      throw new Error(
+        `Calculated transaction fee ${calculatedFee} exceeds local safety maximum ` +
+          `${CardanoAmounts.MAX_TRANSACTION_FEE_LOVELACE} lovelace`
+      );
+    }
+    if (parameters && totalSize > parameters.maxTxSize) {
+      releaseIteration();
       throw new Error("Transaction exceeds protocol maxTxSize");
+    }
 
     logger.info(
       `[${label}] body: ${txBodySize}B, total: ${totalSize}B, fee: ${calculatedFee} lovelace`
@@ -836,8 +852,7 @@ const convergeTransactionFee = (
       logger.info(`[${label}] fee converged at ${currentFee} after ${i + 1} iterations`);
       return { outputs, fee: currentFee, txBody };
     }
-    txBody.free();
-    outputs.forEach((output) => output.free());
+    releaseIteration();
     currentFee = calculatedFee;
   }
 

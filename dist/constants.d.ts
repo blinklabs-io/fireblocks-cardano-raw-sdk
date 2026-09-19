@@ -82,7 +82,17 @@ export declare enum CardanoAmounts {
     /**
      * Stop the fee-convergence loop when the delta between iterations is within this bound (lovelace).
      */
-    TX_FEE_TOLERANCE = 1000
+    TX_FEE_TOLERANCE = 1000,
+    /**
+     * Local safety ceiling for a single transaction fee.
+     *
+     * Protocol parameters are supplied by the configured data provider. Keeping
+     * this limit independent of those parameters prevents a compromised or
+     * misconfigured provider from coercing the signer into an excessive fee.
+     * Five ADA leaves substantial headroom over ordinary maximum-size Cardano
+     * transactions while requiring an explicit SDK update for larger fees.
+     */
+    MAX_TRANSACTION_FEE_LOVELACE = 5000000
 }
 /**
  * Fireblocks webhook validation constants

@@ -137,6 +137,14 @@ describe("verified transfer construction", () => {
       expect(outputs + BigInt(second.fee)).toBe(50000000n);
     }
   );
+  it.each(["ADA", "CNT", "multi", "consolidation"])(
+    "%s rejects an excessive provider-derived fee before signing",
+    (kind) => {
+      expect(() => build(kind, { ...snapshot(), minFeeB: 20_000_000 })).toThrow(
+        "exceeds local safety maximum"
+      );
+    }
+  );
   it("uses current byte cost for minimum ADA and rejects oversized transactions", () => {
     expect(() => build("ADA", { ...snapshot(), coinsPerUtxoByte: 50000 })).toThrow(
       "minimum required"
