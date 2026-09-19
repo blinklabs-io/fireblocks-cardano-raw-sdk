@@ -140,7 +140,7 @@ export class FireblocksCardanoRawSDK {
         const { index = 0, groupByPolicy = false, includeMetadata = false } = options;
         // Use cached address fetching
         const address = await this.getAddressByIndex(this.assetId, index);
-        this.logger.info(`Getting balance for address ${address} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`);
+        this.logger.info(`Getting balance for address ${address} (includeMetadata: ${includeMetadata})`);
         const response = await this.chainProvider.getBalanceByAddress({
             address,
             groupByPolicy,
@@ -157,10 +157,10 @@ export class FireblocksCardanoRawSDK {
      */
     getVaultBalance = async (options = {}) => {
         const { groupBy = GroupByOptions.TOKEN, includeMetadata = false } = options;
-        this.logger.info(`Getting vault balance for vault ${this.vaultAccountId}, groupBy: ${groupBy}, includeMetadata: ${includeMetadata}`);
+        this.logger.info(`Getting configured vault balance, groupBy: ${groupBy}, includeMetadata: ${includeMetadata}`);
         const addresses = await this.fireblocksService.getVaultAccountAddresses(this.vaultAccountId, this.assetId);
         if (!addresses || addresses.length === 0) {
-            this.logger.warn(`No addresses found for vault ${this.vaultAccountId}`);
+            this.logger.warn("No addresses found for configured vault");
             return this.getEmptyVaultBalance(groupBy);
         }
         // Fetch balances for all addresses in parallel
@@ -217,7 +217,7 @@ export class FireblocksCardanoRawSDK {
         // Derive the stake key from the base address
         const isMainnet = this.network === Networks.MAINNET;
         const stakeKey = getStakeAddressFromBaseAddress(baseAddress, isMainnet);
-        this.logger.info(`Getting balance for stake key ${stakeKey} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`);
+        this.logger.info(`Getting balance for stake key ${stakeKey} (includeMetadata: ${includeMetadata})`);
         const response = await this.requireIagonProvider(ChainProviderCapability.ACCOUNT_QUERIES).getBalanceByStakeKey({
             stakeKey,
             groupByPolicy,
@@ -313,7 +313,7 @@ export class FireblocksCardanoRawSDK {
         };
         const addressesResponse = await this.fireblocksService.getVaultAccountAddresses(this.vaultAccountId, this.assetId);
         if (!addressesResponse || addressesResponse.length === 0) {
-            this.logger.warn(`No addresses found for vault account ${this.vaultAccountId}`);
+            this.logger.warn("No addresses found for configured vault");
             return {
                 success: true,
                 data: options.groupByAddress ? {} : [],
@@ -404,7 +404,7 @@ export class FireblocksCardanoRawSDK {
      */
     getUtxosByAddress = async (index = 0) => {
         const address = await this.getAddressByIndex(this.assetId, index);
-        this.logger.info(`Getting UTXOs for vault ${this.vaultAccountId} at index ${index} (address: ${address})`);
+        this.logger.info(`Getting UTXOs at index ${index} (address: ${address})`);
         return await this.chainProvider.getUtxosByAddress(address);
     };
     /**
@@ -413,7 +413,7 @@ export class FireblocksCardanoRawSDK {
     getUtxosByVaultAccountId = async () => {
         const allAddresses = await this.fireblocksService.getVaultAccountAddresses(this.vaultAccountId, this.assetId);
         const addresses = allAddresses.filter((addr) => addr.address && addr.addressFormat === "BASE");
-        this.logger.info(`Getting UTxOs for all ${addresses.length} BASE addresses in vault ${this.vaultAccountId}`);
+        this.logger.info(`Getting UTxOs for all ${addresses.length} configured BASE addresses`);
         const results = await Promise.all(addresses.map(async (addr) => {
             const response = await this.chainProvider.getUtxosByAddress(addr.address);
             return {
@@ -429,7 +429,7 @@ export class FireblocksCardanoRawSDK {
      */
     getTransactionHistory = async (index = 0, options = {}) => {
         const address = await this.getAddressByIndex(this.assetId, index);
-        this.logger.info(`Getting transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`);
+        this.logger.info(`Getting transaction history for asset ${this.assetId}, at index ${index} (address: ${address})`);
         return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory({
             address,
             ...options,
@@ -440,7 +440,7 @@ export class FireblocksCardanoRawSDK {
      */
     getDetailedTxHistory = async (index = 0, options = {}) => {
         const address = await this.getAddressByIndex(this.assetId, index);
-        this.logger.info(`Getting detailed transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`);
+        this.logger.info(`Getting detailed transaction history for asset ${this.assetId}, at index ${index} (address: ${address})`);
         return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory({
             address,
             ...options,
@@ -451,7 +451,7 @@ export class FireblocksCardanoRawSDK {
      * @param options.groupByAddress - If true, returns data grouped by address. If false, returns flat array with address field
      */
     getAllTransactionHistory = async (options = {}) => {
-        this.logger.info(`Getting transaction history for all addresses in vault ${this.vaultAccountId}`);
+        this.logger.info("Getting transaction history for all configured addresses");
         return this.fetchAllVaultHistory((params) => this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory(params), options);
     };
     /**
@@ -459,7 +459,7 @@ export class FireblocksCardanoRawSDK {
      * @param options.groupByAddress - If true, returns data grouped by address. If false, returns flat array with address field
      */
     getAllDetailedTxHistory = async (options = {}) => {
-        this.logger.info(`Getting detailed transaction history for all addresses in vault ${this.vaultAccountId}`);
+        this.logger.info("Getting detailed transaction history for all configured addresses");
         return this.fetchAllVaultHistory((params) => this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory(params), options);
     };
     /**
@@ -858,7 +858,7 @@ export class FireblocksCardanoRawSDK {
         try {
             // Log transfer initiation
             if (recipientVaultAccountId) {
-                this.logger.info(`Initiating vault-to-vault transfer: ${requiredTokenAmount} ${tokenName} from vault ${this.vaultAccountId} to vault ${recipientVaultAccountId}`);
+                this.logger.info(`Initiating vault-to-vault transfer: ${requiredTokenAmount} ${tokenName}`);
             }
             else {
                 this.logger.info(`Initiating transfer: ${requiredTokenAmount} ${tokenName} to ${options.recipientAddress}`);
@@ -1182,7 +1182,7 @@ export class FireblocksCardanoRawSDK {
     transferAda = async (options) => {
         try {
             const { index = 0, recipientAddress, recipientVaultAccountId, recipientIndex = 0, lovelaceAmount, } = options;
-            this.logger.info(`Initiating ADA transfer: ${lovelaceAmount} lovelace to ${recipientAddress ?? `vault ${recipientVaultAccountId}`}`);
+            this.logger.info(`Initiating ADA transfer: ${lovelaceAmount} lovelace to ${recipientAddress ?? "configured vault"}`);
             if (options.governance && this.chainProvider.kind !== "demeter") {
                 throw new SdkApiError("Strict Fireblocks RAW-signing governance is available only for locally built Demeter ADA transfers", 400, "GovernanceProviderUnsupported", { provider: this.chainProvider.kind }, "FireblocksCardanoRawSDK");
             }
@@ -1405,7 +1405,7 @@ export class FireblocksCardanoRawSDK {
         // even if prepareMultiTokenTransaction throws before producing the real fn.
         let release = () => { };
         try {
-            this.logger.info(`Initiating multi-token transfer: ${options.tokens.length} token type(s) to ${options.recipientAddress ?? `vault ${options.recipientVaultAccountId}`}`);
+            this.logger.info(`Initiating multi-token transfer: ${options.tokens.length} token type(s) to ${options.recipientAddress ?? "configured vault"}`);
             const { txBody, senderAddress, resolvedRecipientAddress, fee, changeTokenAssets, release: _release, } = await this.prepareMultiTokenTransaction(options, true);
             release = _release; // promote to outer scope so finally can call it
             const feeFormatted = formatWithDecimals(fee, CardanoConstants.ADA_DECIMALS);
@@ -1837,8 +1837,8 @@ export class FireblocksCardanoRawSDK {
                 };
                 return { assetId, metadata };
             }
-            catch (error) {
-                this.logger.warn(`Failed to fetch metadata for ${assetId}: ${error instanceof Error ? error.message : String(error)}`);
+            catch {
+                this.logger.warn(`Failed to fetch metadata for ${assetId}`);
                 return null;
             }
         });
@@ -2179,7 +2179,7 @@ export class FireblocksCardanoRawSDK {
      * ```
      */
     registerStakingCredential = async (options) => {
-        this.logger.info(`Registering staking credential for vault account ${options.vaultAccountId}`);
+        this.logger.info("Registering staking credential");
         return await this.requireStakingService().registerStakingCredential(options);
     };
     /**
@@ -2203,7 +2203,7 @@ export class FireblocksCardanoRawSDK {
      * ```
      */
     delegateToPool = async (options) => {
-        this.logger.info(`Delegating to pool ${options.poolId} for vault account ${options.vaultAccountId}`);
+        this.logger.info("Delegating staking credential to pool");
         const { vaultAccountId, poolId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
         return await this.requireStakingService().delegateToPool({ vaultAccountId, poolId, fee });
     };
@@ -2227,7 +2227,7 @@ export class FireblocksCardanoRawSDK {
      * ```
      */
     deregisterStakingCredential = async (options) => {
-        this.logger.info(`Deregistering staking credential for vault account ${options.vaultAccountId}`);
+        this.logger.info("Deregistering staking credential");
         const { vaultAccountId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
         return await this.requireStakingService().deregisterStakingCredential({ vaultAccountId, fee });
     };
@@ -2259,12 +2259,12 @@ export class FireblocksCardanoRawSDK {
      * ```
      */
     withdrawRewards = async (options) => {
-        this.logger.info(`Withdrawing rewards for vault account ${options.vaultAccountId}`);
+        this.logger.info("Withdrawing staking rewards");
         const { vaultAccountId, limit, fee = CardanoAmounts.STAKING_TX_FEE } = options;
         return await this.requireStakingService().withdrawRewards({ vaultAccountId, limit, fee });
     };
     getStakeAccountInfo = async (vaultAccountId) => {
-        this.logger.info(`Getting staking account info for vault account ${vaultAccountId}`);
+        this.logger.info("Getting staking account info");
         const stakeAddress = await this.requireStakingService().getStakeAddress(vaultAccountId);
         const response = await this.requireIagonProvider(ChainProviderCapability.STAKING).getStakeAccountInfo(stakeAddress);
         return response.data;
@@ -2298,7 +2298,7 @@ export class FireblocksCardanoRawSDK {
      * ```
      */
     queryStakingRewards = async (vaultAccountId) => {
-        this.logger.info(`Querying staking rewards for vault account ${vaultAccountId}`);
+        this.logger.info("Querying staking rewards");
         return await this.requireStakingService().queryStakingRewards(vaultAccountId);
     };
     /**
@@ -2362,7 +2362,7 @@ export class FireblocksCardanoRawSDK {
      * ```
      */
     registerAsDRep = async (options) => {
-        this.logger.info(`Registering vault account ${options.vaultAccountId} as a DRep`);
+        this.logger.info("Registering configured vault as a DRep");
         return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).registerAsDRep(options);
     };
     /**
@@ -2392,7 +2392,7 @@ export class FireblocksCardanoRawSDK {
         return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).castVote(options);
     };
     delegateToDRep = async (options) => {
-        this.logger.info(`Delegating to DRep (${options.drepAction}) for vault account ${options.vaultAccountId}`);
+        this.logger.info(`Delegating staking credential to DRep (${options.drepAction})`);
         const { vaultAccountId, drepAction, drepId, fee = CardanoAmounts.GOVERNANCE_TX_FEE } = options;
         return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).delegateToDRep({
             vaultAccountId,
@@ -2420,7 +2420,7 @@ export class FireblocksCardanoRawSDK {
      * ```
      */
     getStakeAddress = async (vaultAccountId) => {
-        this.logger.info(`Getting stake address for vault account ${vaultAccountId}`);
+        this.logger.info("Getting stake address");
         return await this.requireStakingService().getStakeAddress(vaultAccountId);
     };
     /**

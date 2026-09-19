@@ -6,13 +6,12 @@ const logger = new Logger("app:server-initializer");
         logger.info("server starting...");
         startServer();
     }
-    catch (e) {
-        if (e instanceof Error) {
-            logger.error("Error starting server:", { message: e.message, stack: e.stack });
-        }
-        else {
-            logger.error("Error starting server:", e);
-        }
+    catch (error) {
+        // Startup errors can contain environment-derived configuration and paths.
+        // Preserve a safe error category without logging messages or stack traces.
+        logger.error("Error starting server", {
+            errorName: error instanceof Error ? error.name : typeof error,
+        });
         process.exit(1);
     }
 })();

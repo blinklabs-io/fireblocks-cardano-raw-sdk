@@ -29,9 +29,7 @@ const validateNetwork = (networkStr: string | undefined): Networks => {
   const network = networkStr?.toLowerCase() || "mainnet";
 
   if (!VALID_NETWORKS.includes(network)) {
-    throw new Error(
-      `Invalid CARDANO_NETWORK: "${networkStr}". Must be one of: ${VALID_NETWORKS.join(", ")}`
-    );
+    throw new Error(`Invalid CARDANO_NETWORK. Must be one of: ${VALID_NETWORKS.join(", ")}`);
   }
 
   if (network === "mainnet") return Networks.MAINNET;
@@ -215,7 +213,7 @@ const startServer = () => {
 
   server.listen(config.PORT, serverHost, () => {
     logger.info(`${config.APP_NAME} listening on ${serverHost}:${config.PORT}`);
-    logger.info(`Network: ${network}`);
+    logger.info("Cardano network configuration validated");
   });
 };
 
@@ -233,7 +231,7 @@ const parsePositiveInteger = (
 };
 
 const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {
-  logger.error(`Unhandled error: ${err.message}`, { stack: err.stack });
+  logger.error("Unhandled request error", { errorName: err.name });
   res.status(500).json({ error: "Internal server error" });
 };
 

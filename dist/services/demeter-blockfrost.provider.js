@@ -124,8 +124,8 @@ export class DemeterBlockfrostProvider {
                 },
             };
         }
-        catch (error) {
-            this.logger.warn(`Demeter health check failed: ${this.errorMessage(error)}`);
+        catch {
+            this.logger.warn("Demeter health check failed");
             return {
                 success: false,
                 data: { status: "unhealthy", timestamp: new Date().toISOString() },

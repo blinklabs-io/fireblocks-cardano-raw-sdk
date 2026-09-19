@@ -5,7 +5,11 @@ const escapeLogText = (value) => Array.from(value, (character) => {
     return code < 32 || (code >= 127 && code <= 159) || code === 0x2028 || code === 0x2029
         ? `\\u${code.toString(16).padStart(4, "0")}`
         : character;
-}).join("");
+})
+    .join("")
+    // Explicit postcondition for static analyzers and future formatter changes:
+    // no caller-controlled CR/LF may reach a plain-text log sink.
+    .replace(/\n|\r/g, "");
 export var LogLevel;
 (function (LogLevel) {
     LogLevel[LogLevel["DEBUG"] = 0] = "DEBUG";
@@ -79,12 +83,40 @@ export class Logger {
      * @returns Sanitized arguments
      */
     sanitizeArgs(args) {
-        if (!Logger.sanitizeLogs) {
-            return args.map((arg) => (typeof arg === "string" ? escapeLogText(arg) : arg));
-        }
         return args.map((arg) => {
-            const sanitized = sanitizeForLogging(arg, Logger.customSensitiveKeys);
-            return typeof sanitized === "string" ? escapeLogText(sanitized) : sanitized;
+            if (typeof arg === "string")
+                return escapeLogText(arg);
+            if (arg instanceof Error)
+                return JSON.stringify({ name: arg.name });
+            const sanitized = Logger.sanitizeLogs
+                ? sanitizeForLogging(arg, Logger.customSensitiveKeys)
+                : arg;
+            if (sanitized === null || sanitized === undefined)
+                return String(sanitized);
+            if (typeof sanitized === "number" ||
+                typeof sanitized === "boolean" ||
+                typeof sanitized === "bigint") {
+                return String(sanitized);
+            }
+            if (typeof sanitized === "function" || typeof sanitized === "symbol") {
+                return `[${typeof sanitized}]`;
+            }
+            try {
+                const serialized = JSON.stringify(sanitized, (_key, value) => {
+                    if (value instanceof Error)
+                        return { name: value.name };
+                    if (typeof value === "bigint")
+                        return value.toString();
+                    if (typeof value === "function" || typeof value === "symbol") {
+                        return `[${typeof value}]`;
+                    }
+                    return value;
+                });
+                return escapeLogText(serialized ?? `[${typeof sanitized}]`);
+            }
+            catch {
+                return "[Unserializable value]";
+            }
         });
     }
     /**

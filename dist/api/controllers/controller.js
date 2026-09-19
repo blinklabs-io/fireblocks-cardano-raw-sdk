@@ -166,7 +166,7 @@ export class ApiController {
         const { index } = req.query;
         try {
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.getUtxosByAddress(index));
-            this.logger.info(`UTXOs retrieved successfully for vault ${vaultAccountId}`);
+            this.logger.info("UTXOs retrieved successfully for configured vault");
             ok(res, result);
         }
         catch (error) {
@@ -177,7 +177,7 @@ export class ApiController {
         const { vaultAccountId } = req.params;
         try {
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.getUtxosByVaultAccountId());
-            this.logger.info(`Vault UTxOs retrieved for vault ${vaultAccountId}`);
+            this.logger.info("Vault UTxOs retrieved successfully");
             ok(res, result);
         }
         catch (error) {
@@ -219,7 +219,7 @@ export class ApiController {
         };
         try {
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.getAllTransactionHistory(options));
-            this.logger.info(`All transactions history retrieved successfully for vault ${vaultAccountId}`);
+            this.logger.info("All transactions history retrieved successfully for configured vault");
             ok(res, result);
         }
         catch (error) {
@@ -237,7 +237,7 @@ export class ApiController {
         };
         try {
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.getAllDetailedTxHistory(options));
-            this.logger.info(`All detailed transactions history retrieved successfully for vault ${vaultAccountId}`);
+            this.logger.info("All detailed transactions history retrieved successfully for configured vault");
             ok(res, result);
         }
         catch (error) {
@@ -379,7 +379,7 @@ export class ApiController {
             const depositAmount = CardanoAmounts.DEPOSIT_AMOUNT;
             const fee = CardanoAmounts.STAKING_TX_FEE;
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.registerStakingCredential({ vaultAccountId, index, depositAmount, fee }));
-            this.logger.info(`Staking registration successful for vault ${vaultAccountId}`);
+            this.logger.info("Staking registration successful");
             ok(res, result);
         }
         catch (error) {
@@ -401,7 +401,7 @@ export class ApiController {
             }
             const fee = CardanoAmounts.STAKING_TX_FEE;
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.deregisterStakingCredential({ vaultAccountId, fee }));
-            this.logger.info(`Staking deregistration successful for vault ${vaultAccountId}`);
+            this.logger.info("Staking deregistration successful");
             ok(res, result);
         }
         catch (error) {
@@ -429,7 +429,7 @@ export class ApiController {
             }
             const fee = CardanoAmounts.STAKING_TX_FEE;
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.delegateToPool({ vaultAccountId, poolId, fee }));
-            this.logger.info(`Pool delegation successful for vault ${vaultAccountId} to pool ${poolId}`);
+            this.logger.info("Pool delegation successful");
             ok(res, result);
         }
         catch (error) {
@@ -451,7 +451,7 @@ export class ApiController {
             }
             const fee = CardanoAmounts.STAKING_TX_FEE;
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.withdrawRewards({ vaultAccountId, limit, fee }));
-            this.logger.info(`Reward withdrawal successful for vault ${vaultAccountId}`);
+            this.logger.info("Reward withdrawal successful");
             ok(res, result);
         }
         catch (error) {
@@ -468,7 +468,7 @@ export class ApiController {
                 });
             }
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.getStakeAccountInfo(vaultAccountId));
-            this.logger.info(`Staking account info retrieved successfully for vault ${vaultAccountId}`);
+            this.logger.info("Staking account info retrieved successfully");
             ok(res, result);
         }
         catch (error) {
@@ -499,7 +499,7 @@ export class ApiController {
                 });
             }
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.queryStakingRewards(vaultAccountId));
-            this.logger.info(`Staking rewards queried successfully for vault ${vaultAccountId}`);
+            this.logger.info("Staking rewards queried successfully");
             ok(res, result);
         }
         catch (error) {
@@ -514,7 +514,7 @@ export class ApiController {
         try {
             const { vaultAccountId, governanceActionId, vote, anchor, fee } = req.body;
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.castGovernanceVote({ vaultAccountId, governanceActionId, vote, anchor, fee }));
-            this.logger.info(`Governance vote "${vote}" submitted for vault ${vaultAccountId}: ${result.txHash}`);
+            this.logger.info(`Governance vote "${vote}" submitted: ${result.txHash}`);
             ok(res, result);
         }
         catch (error) {
@@ -530,7 +530,7 @@ export class ApiController {
             const { vaultAccountId, drepAction, drepId } = req.body;
             const fee = CardanoAmounts.GOVERNANCE_TX_FEE;
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.delegateToDRep({ vaultAccountId, drepAction, drepId, fee }));
-            this.logger.info(`DRep delegation successful for vault ${vaultAccountId}`);
+            this.logger.info("DRep delegation successful");
             ok(res, result);
         }
         catch (error) {
@@ -545,7 +545,7 @@ export class ApiController {
         try {
             const { vaultAccountId, anchor, depositAmount, fee } = req.body;
             const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.registerAsDRep({ vaultAccountId, anchor, depositAmount, fee }));
-            this.logger.info(`DRep registration submitted for vault ${vaultAccountId}: ${result.txHash}`);
+            this.logger.info(`DRep registration submitted: ${result.txHash}`);
             ok(res, result);
         }
         catch (error) {
@@ -626,7 +626,7 @@ export class ApiController {
                 });
             }
             const stakeAddress = await this.sdkManager.withSdk(vaultAccountId, (sdk) => sdk.getStakeAddress(vaultAccountId));
-            this.logger.info(`Stake address retrieved successfully for vault ${vaultAccountId}: ${stakeAddress}`);
+            this.logger.info(`Stake address retrieved successfully: ${stakeAddress}`);
             ok(res, { stakeAddress });
         }
         catch (error) {

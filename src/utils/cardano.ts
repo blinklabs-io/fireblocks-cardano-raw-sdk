@@ -331,11 +331,8 @@ export const fetchUtxos = async (
       logger.warn(`API returned success=false for address: ${address}`);
       return [];
     }
-  } catch (error: unknown) {
-    logger.error(
-      `Error fetching UTXOs for ${address}: ${error instanceof Error ? error.message : String(error)}`,
-      error instanceof Error ? error.stack : undefined
-    );
+  } catch {
+    logger.error(`Error fetching UTXOs for ${address}`);
     return [];
   }
 };

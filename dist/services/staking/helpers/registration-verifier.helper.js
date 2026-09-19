@@ -12,8 +12,8 @@ export class RegistrationVerifier {
     }
     verifyAsync(stakeAddress) {
         setTimeout(() => {
-            this.performVerification(stakeAddress).catch((error) => {
-                this.logger.warn(`Background verification failed: ${error}`);
+            this.performVerification(stakeAddress).catch(() => {
+                this.logger.warn("Background registration verification failed");
             });
         }, 0);
     }

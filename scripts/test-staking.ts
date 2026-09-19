@@ -56,17 +56,15 @@ async function main() {
   // Validate network
   const validNetworks = ["mainnet", "preprod"];
   if (!validNetworks.includes(networkStr.toLowerCase())) {
-    throw new Error(
-      `Invalid CARDANO_NETWORK: "${networkStr}". Must be one of: ${validNetworks.join(", ")}`
-    );
+    throw new Error(`Invalid CARDANO_NETWORK. Must be one of: ${validNetworks.join(", ")}`);
   }
 
   const secretKey = resolveSecretKey();
   const network = networkStr.toLowerCase() === "mainnet" ? Networks.MAINNET : Networks.PREPROD;
 
   console.log(`\n=== Staking Test ===`);
-  console.log(`Network: ${networkStr}`);
-  console.log(`Vault: ${vaultAccountId}`);
+  console.log("Network configuration validated");
+  console.log("Vault configuration loaded");
   console.log(`Action: ${action}`);
   if (poolId) console.log(`Pool ID: ${poolId}`);
   console.log(`====================\n`);
@@ -186,7 +184,7 @@ async function main() {
   throw new Error(`Unknown action: ${action}. Use 'info', 'register', 'delegate', or 'withdraw'.`);
 }
 
-main().catch((err) => {
-  console.error("Staking operation failed:", err);
+main().catch(() => {
+  console.error("Staking operation failed");
   process.exit(1);
 });

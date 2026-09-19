@@ -180,10 +180,8 @@ export class IagonApiService implements CardanoDataProvider {
           timestamp: new Date().toISOString(),
         },
       };
-    } catch (error: unknown) {
-      this.logger.error(
-        `Iagon health check error: ${error instanceof Error ? error.message : String(error)}`
-      );
+    } catch {
+      this.logger.error("Iagon health check failed");
       return {
         success: false,
         data: {

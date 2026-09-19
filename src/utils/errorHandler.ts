@@ -21,11 +21,12 @@ export class ErrorHandler {
 
       // Provider response bodies and request URLs may contain credentials or signed payloads.
       this.logger.error(`Error ${context}`);
-      this.logger.error("Status:", status);
-
-      // Log additional axios error details for non-response errors
+      // Log only categorical failure information. Provider errors can retain
+      // environment-derived identifiers in status/code/message properties.
+      if (status !== undefined) {
+        this.logger.error("Provider returned an HTTP error response");
+      }
       if (!error.response) {
-        this.logger.error("Error Code:", error.code);
         if (error.request) {
           this.logger.error("Request was made but no response received");
         } else {
