@@ -25,10 +25,10 @@ export default {
   ],
   coverageThreshold: {
     global: {
-      branches: 30,
-      functions: 35,
-      lines: 40,
-      statements: 40,
+      branches: 42,
+      functions: 48,
+      lines: 49,
+      statements: 50,
     },
   },
   coverageReporters: ["text-summary", "lcov", "html"],
