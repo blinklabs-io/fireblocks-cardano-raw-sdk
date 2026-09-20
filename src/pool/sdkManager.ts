@@ -156,7 +156,7 @@ export class SdkManager {
 
     // Reuse existing SDK
     if (poolItem) {
-      this.logger.debug(`Reusing SDK for vault ${vaultAccountId}`);
+      this.logger.debug("Reusing SDK for configured vault");
       poolItem.lastUsed = new Date();
       poolItem.useCount++;
       return poolItem.sdk;
@@ -173,7 +173,7 @@ export class SdkManager {
     }
 
     // Create new SDK
-    this.logger.info(`Creating new SDK for Vault #${vaultAccountId}`);
+    this.logger.info("Creating new SDK for configured vault");
     const sdk = await this.sdkFactory(vaultAccountId, this.baseConfig, this.network);
 
     this.sdkPool.set(key, {
@@ -245,10 +245,8 @@ export class SdkManager {
       this.sdkPool.delete(oldestKey);
       item?.sdk
         .shutdown()
-        .catch((err) =>
-          this.logger.error(`Shutdown error during LRU eviction for vault ${oldestKey}:`, err)
-        );
-      this.logger.info(`Evicted idle SDK for vault ${oldestKey}`);
+        .catch((err) => this.logger.error("Shutdown error during LRU eviction:", err));
+      this.logger.info("Evicted idle vault SDK");
       return true;
     }
 
@@ -277,11 +275,11 @@ export class SdkManager {
       if (poolItem) {
         // Shutdown the SDK before removing
         poolItem.sdk.shutdown().catch((err) => {
-          this.logger.error(`Error shutting down SDK for vault ${key}:`, err);
+          this.logger.error("Error shutting down vault SDK:", err);
         });
       }
       this.sdkPool.delete(key);
-      this.logger.info(`Removed idle SDK for vault ${key}`);
+      this.logger.info("Removed idle vault SDK");
     }
   }
 

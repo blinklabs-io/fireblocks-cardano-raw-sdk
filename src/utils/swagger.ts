@@ -33,6 +33,16 @@ export const getSwaggerSpec = (): ReturnType<typeof swaggerJsdoc> => {
             description: "Local server",
           },
         ],
+        components: {
+          securitySchemes: {
+            bearerAuth: {
+              type: "http",
+              scheme: "bearer",
+              description: "SERVER_API_KEY. The x-api-key header is also accepted.",
+            },
+          },
+        },
+        security: [{ bearerAuth: [] }],
         tags: [
           { name: "Health", description: "Service health checks" },
           {

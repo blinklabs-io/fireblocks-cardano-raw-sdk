@@ -3,11 +3,13 @@ import {
   VaultWalletAddress,
   TransactionRequest,
   TransactionOperation,
+  TransactionStateEnum,
   TransferPeerPathType,
 } from "@fireblocks/ts-sdk";
 
 import {
   Logger,
+  validateProtocolParameters,
   buildAdaTransactionWithCalculatedFee,
   fetchAndSelectUtxosForAda,
   fetchAndSelectUtxosForMultiToken,
@@ -92,14 +94,29 @@ import {
   ConsolidateUtxosOpts,
   ConsolidateUtxosResult,
   ConsolidateBatchResult,
+  CardanoDataProvider,
+  ChainProviderCapability,
+  ChainProviderConfig,
+  ProviderCapabilityError,
+  FireblocksGovernanceRequirements,
+  FireblocksGovernanceEvidence,
+  GovernanceAuthorizationGroupEvidence,
 } from "./types/index.js";
 
-import { FireblocksService, IagonApiService, StakingService } from "./services/index.js";
+import {
+  DemeterBlockfrostProvider,
+  FireblocksService,
+  IagonApiService,
+  StakingService,
+} from "./services/index.js";
 import { CardanoAmounts, CardanoConstants, FireblocksWebhookConstants } from "./constants.js";
 
 import {
   Address,
+  BaseAddress,
   Ed25519Signature,
+  EnterpriseAddress,
+  PointerAddress,
   PublicKey,
   Transaction,
   TransactionBody,
@@ -113,19 +130,58 @@ import { blake2b } from "blakejs";
 import crypto from "crypto";
 import { createRemoteJWKSet, compactVerify } from "jose";
 
+interface CardanoWasmHandle {
+  free(): void;
+}
+
+const trackCardanoHandle = <T extends CardanoWasmHandle>(
+  handles: CardanoWasmHandle[],
+  handle: T
+): T => {
+  handles.push(handle);
+  return handle;
+};
+
+const releaseCardanoHandles = (handles: CardanoWasmHandle[]): void => {
+  for (let index = handles.length - 1; index >= 0; index--) handles[index].free();
+};
+
 export interface SDKConfig {
   vaultAccountId: string;
   fireblocksService: FireblocksService;
-  iagonApiService: IagonApiService;
-  stakingService: StakingService;
+  chainProvider: CardanoDataProvider;
+  iagonApiService?: IagonApiService;
+  stakingService?: StakingService;
   network: Networks;
   logger: Logger;
 }
 
+type RawSigningGovernanceEvidence = Omit<
+  FireblocksGovernanceEvidence,
+  "preflight" | "chainProvider" | "submittedTransactionHash" | "demeterSubmissionHashMatchesBody"
+>;
+
+interface PreparedAdaTransaction {
+  txBody: TransactionBody;
+  senderAddress: string;
+  resolvedRecipientAddress: string;
+  fee: number;
+  changeTokenAssets: Record<string, number>;
+  selectedUtxos: UtxoData[];
+  accumulatedAda: number;
+}
+
 export class FireblocksCardanoRawSDK {
+  /** Narrow indexed reads. Broad legacy capability flags do not imply these operations, or vice versa. */
+  public getChainQueries() {
+    if (!this.chainProvider.queries)
+      throw new Error(`Provider '${this.chainProvider.kind}' has no indexed-query adapter`);
+    return this.chainProvider.queries;
+  }
   private readonly fireblocksService: FireblocksService;
-  private readonly iagonApiService: IagonApiService;
-  private readonly stakingService: StakingService;
+  private readonly chainProvider: CardanoDataProvider;
+  private readonly iagonApiService?: IagonApiService;
+  private readonly stakingService?: StakingService;
   private network: Networks;
   private vaultAccountId: string;
   private addresses: Map<number, string> = new Map();
@@ -142,6 +198,7 @@ export class FireblocksCardanoRawSDK {
     this.logger = config.logger;
 
     this.fireblocksService = config.fireblocksService;
+    this.chainProvider = config.chainProvider;
     this.iagonApiService = config.iagonApiService;
     this.stakingService = config.stakingService;
     this.network = config.network;
@@ -159,14 +216,64 @@ export class FireblocksCardanoRawSDK {
     return this.network === Networks.MAINNET ? SupportedAssets.ADA : SupportedAssets.ADA_TEST;
   }
 
+  private requireIagonProvider(capability: ChainProviderCapability): IagonApiService {
+    if (!this.iagonApiService) {
+      throw new ProviderCapabilityError(this.chainProvider.kind, capability);
+    }
+    return this.iagonApiService;
+  }
+
+  private requireStakingService(
+    capability: ChainProviderCapability = ChainProviderCapability.STAKING
+  ): StakingService {
+    if (!this.stakingService) {
+      throw new ProviderCapabilityError(this.chainProvider.kind, capability);
+    }
+    return this.stakingService;
+  }
+
+  /** Prove the selected Demeter resource belongs to the configured Cardano network. */
+  private async validateGovernedProviderNetwork(): Promise<{
+    providerNetworkMagic: number;
+    expectedNetworkMagic: number;
+  }> {
+    if (!this.chainProvider.getNetworkMagic) {
+      throw new SdkApiError(
+        "The selected provider cannot prove its Cardano network identity",
+        502,
+        "GovernanceNetworkEvidenceMissing",
+        { provider: this.chainProvider.kind },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    const expectedNetworkMagic =
+      this.network === Networks.MAINNET ? 764824073 : this.network === Networks.PREPROD ? 1 : 2;
+    const providerNetworkMagic = await this.chainProvider.getNetworkMagic();
+    if (providerNetworkMagic !== expectedNetworkMagic) {
+      throw new SdkApiError(
+        `Provider network magic ${providerNetworkMagic} does not match configured ${this.network} network magic ${expectedNetworkMagic}`,
+        400,
+        "GovernanceNetworkMismatch",
+        { providerNetworkMagic, expectedNetworkMagic, network: this.network },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    return { providerNetworkMagic, expectedNetworkMagic };
+  }
+
   public static createInstance = async (params: {
     fireblocksConfig: ConfigurationOptions;
     vaultAccountId: string;
     network: Networks;
-    iagonApiKey: string;
+    /** Select the Cardano chain-data provider. */
+    chainProvider?: ChainProviderConfig;
+    /** @deprecated Use chainProvider: { type: "iagon", apiKey } instead. */
+    iagonApiKey?: string;
     /** Asset metadata cache TTL in milliseconds (default: 1 hour) */
     assetCacheTTL?: number;
-    /** Disable SSL certificate verification (use only in development) */
+    /** @deprecated TLS certificate verification cannot be disabled. */
     disableSslVerification?: boolean;
   }): Promise<FireblocksCardanoRawSDK> => {
     try {
@@ -176,23 +283,41 @@ export class FireblocksCardanoRawSDK {
         fireblocksConfig,
         vaultAccountId,
         network,
+        chainProvider: providerConfig,
         iagonApiKey,
         assetCacheTTL,
         disableSslVerification = false,
       } = params;
 
-      if (network === Networks.PREVIEW) {
-        throw new Error(`Unsupported network: ${network}`);
-      }
-
       const fireblocksService = new FireblocksService(fireblocksConfig);
-      const iagonApiService = new IagonApiService(
-        iagonApiKey,
-        network,
+      const resolvedProviderConfig: ChainProviderConfig = providerConfig ?? {
+        type: "iagon",
+        apiKey: iagonApiKey ?? "",
         assetCacheTTL,
-        disableSslVerification
-      );
-      const stakingService = new StakingService(fireblocksService, iagonApiService, network);
+        disableSslVerification,
+      };
+      let iagonApiService: IagonApiService | undefined;
+      let chainDataProvider: CardanoDataProvider;
+      if (resolvedProviderConfig.type === "iagon") {
+        iagonApiService = new IagonApiService(
+          resolvedProviderConfig.apiKey,
+          network,
+          resolvedProviderConfig.assetCacheTTL,
+          resolvedProviderConfig.disableSslVerification
+        );
+        chainDataProvider = iagonApiService;
+      } else {
+        chainDataProvider = new DemeterBlockfrostProvider({
+          baseUrl: resolvedProviderConfig.baseUrl,
+          apiKey: resolvedProviderConfig.apiKey,
+          maxRetries: resolvedProviderConfig.maxRetries,
+          pageSize: resolvedProviderConfig.pageSize,
+          maxPages: resolvedProviderConfig.maxPages,
+        });
+      }
+      const stakingService = iagonApiService
+        ? new StakingService(fireblocksService, iagonApiService, network)
+        : undefined;
       const assetId = network === Networks.MAINNET ? SupportedAssets.ADA : SupportedAssets.ADA_TEST;
       const wallet = await fireblocksService.getVaultAccountAddress(vaultAccountId, assetId);
 
@@ -206,6 +331,7 @@ export class FireblocksCardanoRawSDK {
 
       const sdkInstance = new FireblocksCardanoRawSDK({
         fireblocksService,
+        chainProvider: chainDataProvider,
         iagonApiService,
         stakingService,
         network,
@@ -222,8 +348,19 @@ export class FireblocksCardanoRawSDK {
     }
   };
 
+  public checkProviderHealth = async (): Promise<HealthStatusResponse> => {
+    return await this.chainProvider.checkHealth();
+  };
+
+  /** @deprecated Use checkProviderHealth(). */
   public checkIagonHealth = async (): Promise<HealthStatusResponse> => {
-    return await this.iagonApiService.checkHealth();
+    if (this.chainProvider.kind !== "iagon") {
+      throw new ProviderCapabilityError(
+        this.chainProvider.kind,
+        ChainProviderCapability.IAGON_COMPATIBILITY
+      );
+    }
+    return await this.chainProvider.checkHealth();
   };
 
   /**
@@ -241,10 +378,10 @@ export class FireblocksCardanoRawSDK {
     const address = await this.getAddressByIndex(this.assetId, index);
 
     this.logger.info(
-      `Getting balance for address ${address} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`
+      `Getting balance for address ${address} (includeMetadata: ${includeMetadata})`
     );
 
-    const response = await this.iagonApiService.getBalanceByAddress({
+    const response = await this.chainProvider.getBalanceByAddress({
       address,
       groupByPolicy,
     });
@@ -270,7 +407,7 @@ export class FireblocksCardanoRawSDK {
     const { groupBy = GroupByOptions.TOKEN, includeMetadata = false } = options;
 
     this.logger.info(
-      `Getting vault balance for vault ${this.vaultAccountId}, groupBy: ${groupBy}, includeMetadata: ${includeMetadata}`
+      `Getting configured vault balance, groupBy: ${groupBy}, includeMetadata: ${includeMetadata}`
     );
 
     const addresses = await this.fireblocksService.getVaultAccountAddresses(
@@ -279,7 +416,7 @@ export class FireblocksCardanoRawSDK {
     );
 
     if (!addresses || addresses.length === 0) {
-      this.logger.warn(`No addresses found for vault ${this.vaultAccountId}`);
+      this.logger.warn("No addresses found for configured vault");
       return this.getEmptyVaultBalance(groupBy);
     }
 
@@ -291,7 +428,7 @@ export class FireblocksCardanoRawSDK {
         const index = addrData.bip44AddressIndex || 0;
 
         try {
-          const balance = await this.iagonApiService.getBalanceByAddress({
+          const balance = await this.chainProvider.getBalanceByAddress({
             address,
             groupByPolicy: groupBy === GroupByOptions.POLICY,
           });
@@ -325,7 +462,9 @@ export class FireblocksCardanoRawSDK {
       `Getting balance for credential ${credential} (includeMetadata: ${includeMetadata})`
     );
 
-    const response = await this.iagonApiService.getBalanceByCredential({
+    const response = await this.requireIagonProvider(
+      ChainProviderCapability.ACCOUNT_QUERIES
+    ).getBalanceByCredential({
       credential,
       groupByPolicy,
     });
@@ -360,10 +499,12 @@ export class FireblocksCardanoRawSDK {
     const stakeKey = getStakeAddressFromBaseAddress(baseAddress, isMainnet);
 
     this.logger.info(
-      `Getting balance for stake key ${stakeKey} (vault: ${this.vaultAccountId}, includeMetadata: ${includeMetadata})`
+      `Getting balance for stake key ${stakeKey} (includeMetadata: ${includeMetadata})`
     );
 
-    const response = await this.iagonApiService.getBalanceByStakeKey({
+    const response = await this.requireIagonProvider(
+      ChainProviderCapability.ACCOUNT_QUERIES
+    ).getBalanceByStakeKey({
       stakeKey,
       groupByPolicy,
     });
@@ -471,9 +612,9 @@ export class FireblocksCardanoRawSDK {
    * Fetches current network slot and returns TTL for transaction building.
    */
   private async fetchCurrentTtl(): Promise<number> {
-    const epochResponse = await this.iagonApiService.getCurrentEpoch();
-    this.logger.info(`Current slot: ${epochResponse.data.tip.slot}, calculating TTL`);
-    return calculateTtl(epochResponse.data.tip.slot);
+    const currentSlot = await this.chainProvider.getCurrentSlot();
+    this.logger.info(`Current slot: ${currentSlot}, calculating TTL`);
+    return calculateTtl(currentSlot);
   }
 
   /**
@@ -481,7 +622,7 @@ export class FireblocksCardanoRawSDK {
    */
   private logAndRethrow(context: string, error: unknown): never {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    this.logger.error(`${context} failed: ${errorMessage}`);
+    this.logger.error(`${context} failed`);
     if (error instanceof Error) throw error;
     throw new Error(`${context}Failed: ${errorMessage}`);
   }
@@ -518,7 +659,7 @@ export class FireblocksCardanoRawSDK {
     );
 
     if (!addressesResponse || addressesResponse.length === 0) {
-      this.logger.warn(`No addresses found for vault account ${this.vaultAccountId}`);
+      this.logger.warn("No addresses found for configured vault");
       return {
         success: true,
         data: options.groupByAddress ? {} : [],
@@ -602,8 +743,32 @@ export class FireblocksCardanoRawSDK {
   public getTransactionDetails = async (
     hash: string
   ): Promise<TransactionDetailsResponse | null> => {
-    return await this.iagonApiService.getTransactionDetails(hash);
+    return await this.chainProvider.getTransactionDetails(hash);
   };
+
+  /** Explicit full-details read; lightweight polling is kept separate. */
+  public getFullTransactionDetails = async (
+    hash: string
+  ): Promise<TransactionDetailsResponse | null> => {
+    if (!this.chainProvider.getFullTransactionDetails) {
+      throw new Error(
+        `Provider '${this.chainProvider.kind}' does not implement getFullTransactionDetails; use its legacy transaction details API`
+      );
+    }
+    return this.chainProvider.getFullTransactionDetails(hash);
+  };
+
+  /** Fresh protocol snapshot for Demeter transfers; legacy IAGON keeps its existing defaults. */
+  private async transferProtocolParameters() {
+    if (this.chainProvider.kind !== "demeter") return undefined;
+    if (!this.chainProvider.getProtocolParameters)
+      throw new Error("Demeter protocol parameters are required");
+    const parameters = await this.chainProvider.getProtocolParameters();
+    const expectedMagic =
+      this.network === Networks.MAINNET ? 764824073 : this.network === Networks.PREVIEW ? 2 : 1;
+    validateProtocolParameters(parameters, expectedMagic);
+    return parameters;
+  }
 
   /**
    * Get UTXOs for a vault account address
@@ -611,11 +776,9 @@ export class FireblocksCardanoRawSDK {
   public getUtxosByAddress = async (index: number = 0): Promise<UtxoIagonResponse> => {
     const address = await this.getAddressByIndex(this.assetId, index);
 
-    this.logger.info(
-      `Getting UTXOs for vault ${this.vaultAccountId} at index ${index} (address: ${address})`
-    );
+    this.logger.info(`Getting UTXOs at index ${index} (address: ${address})`);
 
-    return await this.iagonApiService.getUtxosByAddress(address);
+    return await this.chainProvider.getUtxosByAddress(address);
   };
 
   /**
@@ -631,13 +794,11 @@ export class FireblocksCardanoRawSDK {
 
     const addresses = allAddresses.filter((addr) => addr.address && addr.addressFormat === "BASE");
 
-    this.logger.info(
-      `Getting UTxOs for all ${addresses.length} BASE addresses in vault ${this.vaultAccountId}`
-    );
+    this.logger.info(`Getting UTxOs for all ${addresses.length} configured BASE addresses`);
 
     const results = await Promise.all(
       addresses.map(async (addr) => {
-        const response = await this.iagonApiService.getUtxosByAddress(addr.address!);
+        const response = await this.chainProvider.getUtxosByAddress(addr.address!);
         return {
           index: addr.bip44AddressIndex ?? 0,
           address: addr.address!,
@@ -662,10 +823,13 @@ export class FireblocksCardanoRawSDK {
   ): Promise<TransactionHistoryResponse> => {
     const address = await this.getAddressByIndex(this.assetId, index);
     this.logger.info(
-      `Getting transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`
+      `Getting transaction history for asset ${this.assetId}, at index ${index} (address: ${address})`
     );
 
-    return await this.iagonApiService.getTransactionHistory({ address, ...options });
+    return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory({
+      address,
+      ...options,
+    });
   };
 
   /**
@@ -682,10 +846,13 @@ export class FireblocksCardanoRawSDK {
     const address = await this.getAddressByIndex(this.assetId, index);
 
     this.logger.info(
-      `Getting detailed transaction history for vault ${this.vaultAccountId}, asset ${this.assetId}, at index ${index} (address: ${address})`
+      `Getting detailed transaction history for asset ${this.assetId}, at index ${index} (address: ${address})`
     );
 
-    return await this.iagonApiService.getDetailedTxHistory({ address, ...options });
+    return await this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory({
+      address,
+      ...options,
+    });
   };
 
   /**
@@ -700,11 +867,10 @@ export class FireblocksCardanoRawSDK {
       groupByAddress?: boolean;
     } = {}
   ): Promise<TransactionHistoryResponse | GroupedTransactionHistoryResponse> => {
-    this.logger.info(
-      `Getting transaction history for all addresses in vault ${this.vaultAccountId}`
-    );
+    this.logger.info("Getting transaction history for all configured addresses");
     return this.fetchAllVaultHistory<TransactionHistoryItem>(
-      (params) => this.iagonApiService.getTransactionHistory(params),
+      (params) =>
+        this.requireIagonProvider(ChainProviderCapability.HISTORY).getTransactionHistory(params),
       options
     ) as Promise<TransactionHistoryResponse | GroupedTransactionHistoryResponse>;
   };
@@ -721,11 +887,10 @@ export class FireblocksCardanoRawSDK {
       groupByAddress?: boolean;
     } = {}
   ): Promise<DetailedTxHistoryResponse | GroupedDetailedTxHistoryResponse> => {
-    this.logger.info(
-      `Getting detailed transaction history for all addresses in vault ${this.vaultAccountId}`
-    );
+    this.logger.info("Getting detailed transaction history for all configured addresses");
     return this.fetchAllVaultHistory<DetailedTransaction>(
-      (params) => this.iagonApiService.getDetailedTxHistory(params),
+      (params) =>
+        this.requireIagonProvider(ChainProviderCapability.HISTORY).getDetailedTxHistory(params),
       options
     ) as Promise<DetailedTxHistoryResponse | GroupedDetailedTxHistoryResponse>;
   };
@@ -743,7 +908,7 @@ export class FireblocksCardanoRawSDK {
     lock?: boolean;
   }) {
     const utxoResult = await fetchAndSelectUtxosForCnt({
-      iagonApiService: this.iagonApiService,
+      chainProvider: this.chainProvider,
       ...params,
     });
 
@@ -834,11 +999,13 @@ export class FireblocksCardanoRawSDK {
    */
   private createFireblocksTransactionPayload(
     assetId: SupportedAssets,
-    txHashHex: string
+    txHashHex: string,
+    externalTxId?: string
   ): TransactionRequest {
     return {
       assetId,
       operation: TransactionOperation.Raw,
+      ...(externalTxId && { externalTxId }),
       source: {
         type: TransferPeerPathType.VaultAccount,
         id: this.vaultAccountId,
@@ -857,30 +1024,240 @@ export class FireblocksCardanoRawSDK {
   }
 
   /**
-   * Signs the transaction using Fireblocks and creates witness set
+   * Reduces the matched Fireblocks authorization policy to non-identifying evidence.
    */
-  private async signTransaction(
+  private validateGovernanceAuthorization(
+    requirements: FireblocksGovernanceRequirements,
+    transaction: NonNullable<
+      Awaited<ReturnType<FireblocksService["signTransaction"]>>
+    >["transaction"]
+  ): FireblocksGovernanceEvidence["matchedPolicy"] {
+    if (transaction.externalTxId !== requirements.externalTxId) {
+      throw new SdkApiError(
+        "Fireblocks response externalTxId does not match the governed signing request",
+        502,
+        "GovernanceCorrelationError",
+        { expected: requirements.externalTxId, received: transaction.externalTxId },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    const authorization = transaction.authorizationInfo;
+    if (!authorization?.groups?.length) {
+      throw new SdkApiError(
+        "Fireblocks did not return authorization-group evidence for the governed RAW signing request",
+        403,
+        "GovernanceEvidenceMissing",
+        { fireblocksTransactionId: transaction.id },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    const approvedUsers = new Set<string>();
+    const groups: GovernanceAuthorizationGroupEvidence[] = authorization.groups.map((group) => {
+      const statuses = Object.entries(group.users ?? {});
+      const documentedStatuses = new Set(["APPROVED", "PENDING_AUTHORIZATION", "REJECTED", "NA"]);
+      if (statuses.some(([, status]) => !documentedStatuses.has(status))) {
+        throw new SdkApiError(
+          "Fireblocks returned an unknown authorization status",
+          502,
+          "GovernanceEvidenceInvalid",
+          { fireblocksTransactionId: transaction.id },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+      for (const [userId, status] of statuses) {
+        if (status === "APPROVED") approvedUsers.add(userId);
+      }
+      const approved = statuses.filter(([, status]) => status === "APPROVED").length;
+      const pending = statuses.filter(([, status]) => status === "PENDING_AUTHORIZATION").length;
+      const rejected = statuses.filter(([, status]) => status === "REJECTED").length;
+      const notApplicable = statuses.filter(([, status]) => status === "NA").length;
+      const threshold = group.th ?? 0;
+      return {
+        threshold,
+        approved,
+        pending,
+        rejected,
+        notApplicable,
+        satisfied: threshold > 0 && approved >= threshold,
+      };
+    });
+
+    if (authorization.logic !== "AND" && authorization.logic !== "OR") {
+      throw new SdkApiError(
+        "Fireblocks returned missing or unknown authorization-group logic",
+        502,
+        "GovernanceEvidenceInvalid",
+        { fireblocksTransactionId: transaction.id },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    const logic = authorization.logic;
+    const groupsSatisfied =
+      logic === "OR"
+        ? groups.some((group) => group.satisfied)
+        : groups.every((group) => group.satisfied);
+    const signers = new Set(transaction.signedBy ?? []);
+    const signerCount = signers.size;
+    const allowedSigners = new Set(requirements.allowedSignerIds);
+    const allSignersDesignated =
+      signerCount > 0 && [...signers].every((signerId) => allowedSigners.has(signerId));
+    const requirementsSatisfied =
+      groupsSatisfied &&
+      approvedUsers.size >= requirements.minimumApprovals &&
+      signerCount >= requirements.minimumSigners &&
+      allSignersDesignated;
+
+    if (!requirementsSatisfied) {
+      throw new SdkApiError(
+        "Fireblocks authorization or designated-signer requirements were not satisfied",
+        403,
+        "GovernanceApprovalInsufficient",
+        {
+          authorizationLogic: logic,
+          groups,
+          approvedAuthorizers: approvedUsers.size,
+          requiredApprovals: requirements.minimumApprovals,
+          signerCount,
+          requiredSigners: requirements.minimumSigners,
+          configuredDesignatedSignerCount: allowedSigners.size,
+          allSignersDesignated,
+        },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    return {
+      authorizationInfoPresent: true,
+      evidenceSource: "fireblocks-authorization-info",
+      logic,
+      allowOperatorAsAuthorizer: authorization.allowOperatorAsAuthorizer ?? false,
+      groups,
+      approvedAuthorizers: approvedUsers.size,
+      signerCount,
+      designatedSignerEvidencePresent: true,
+      configuredDesignatedSignerCount: allowedSigners.size,
+      allSignersDesignated: true,
+      minimumApprovals: requirements.minimumApprovals,
+      minimumSigners: requirements.minimumSigners,
+      requirementsSatisfied: true,
+    };
+  }
+
+  /** Signs the exact Cardano body hash and optionally captures governance evidence. */
+  private async signTransactionWithEvidence(
     txBody: TransactionBody,
-    assetId: SupportedAssets = SupportedAssets.ADA
-  ): Promise<Transaction> {
+    assetId: SupportedAssets = SupportedAssets.ADA,
+    governance?: FireblocksGovernanceRequirements,
+    expectedSignerAddress?: string
+  ): Promise<{
+    signedTransaction: Transaction;
+    governance?: RawSigningGovernanceEvidence;
+  }> {
     const txHashHex = this.calculateTransactionHash(txBody);
-    const transactionPayload = this.createFireblocksTransactionPayload(assetId, txHashHex);
+    if (governance && !expectedSignerAddress) {
+      throw new SdkApiError(
+        "A source address is required to verify the governed Fireblocks signer",
+        400,
+        "GovernanceSignerAddressMissing",
+        undefined,
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    const transactionPayload = this.createFireblocksTransactionPayload(
+      assetId,
+      txHashHex,
+      governance?.externalTxId
+    );
 
     const txData = await this.fireblocksService.signTransaction(transactionPayload);
-
-    const signatureResponse = txData?.data[0];
+    if (!txData) {
+      throw new Error("SigningFailed: Fireblocks returned no signing response");
+    }
+    if (txData.id !== txData.transaction.id) {
+      throw new SdkApiError(
+        "Fireblocks signing response IDs do not match",
+        502,
+        "GovernanceCorrelationError",
+        { signingResponseId: txData.id, transactionResponseId: txData.transaction.id },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (governance && txData.transaction.status !== TransactionStateEnum.Completed) {
+      throw new SdkApiError(
+        "Fireblocks governed RAW signing did not reach COMPLETED status",
+        502,
+        "GovernanceAuthorizationIncomplete",
+        { fireblocksTransactionId: txData.id, status: txData.transaction.status },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (governance && txData.data.length !== 1) {
+      throw new SdkApiError(
+        "Fireblocks must return exactly one signed message for a governed Cardano transaction",
+        502,
+        "GovernanceCorrelationError",
+        { fireblocksTransactionId: txData.id, signedMessageCount: txData.data.length },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    const signatureResponse = txData.data[0];
 
     if (!signatureResponse?.publicKey || !signatureResponse?.signature?.fullSig) {
       throw new Error("SigningFailed: Invalid signature response from Fireblocks");
+    }
+    if (governance && signatureResponse.content !== txHashHex) {
+      throw new SdkApiError(
+        "Fireblocks signed-message content does not match the Cardano transaction body hash",
+        502,
+        "GovernanceCorrelationError",
+        { transactionBodyHash: txHashHex, signedMessageHash: signatureResponse.content },
+        "FireblocksCardanoRawSDK"
+      );
     }
 
     const publicKeyBytes = Uint8Array.from(Buffer.from(signatureResponse.publicKey, "hex"));
     const signatureBytes = Uint8Array.from(Buffer.from(signatureResponse.signature.fullSig, "hex"));
 
     const pubKey = PublicKey.from_bytes(publicKeyBytes);
+    const cardanoSig = Ed25519Signature.from_bytes(signatureBytes);
+    if (!pubKey.verify(Buffer.from(txHashHex, "hex"), cardanoSig)) {
+      pubKey.free();
+      cardanoSig.free();
+      throw new SdkApiError(
+        "Fireblocks signature did not verify against the Cardano transaction body hash",
+        502,
+        "SignatureVerificationError",
+        { transactionBodyHash: txHashHex },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (governance) {
+      const sourceAddress = Address.from_bech32(expectedSignerAddress!);
+      const paymentCredential =
+        BaseAddress.from_address(sourceAddress)?.payment_cred() ??
+        EnterpriseAddress.from_address(sourceAddress)?.payment_cred() ??
+        PointerAddress.from_address(sourceAddress)?.payment_cred();
+      const expectedKeyHash = paymentCredential?.to_keyhash();
+      const actualKeyHash = pubKey.hash();
+      const signerMatchesSource =
+        expectedKeyHash !== undefined && expectedKeyHash.to_hex() === actualKeyHash.to_hex();
+      sourceAddress.free();
+      if (!signerMatchesSource) {
+        pubKey.free();
+        cardanoSig.free();
+        throw new SdkApiError(
+          "Fireblocks returned a signing key that does not control the selected source address",
+          502,
+          "GovernanceSignerMismatch",
+          { transactionBodyHash: txHashHex },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+    }
     const cardanoPubKey = Vkey.new(pubKey);
     pubKey.free();
-    const cardanoSig = Ed25519Signature.from_bytes(signatureBytes);
 
     const witness = Vkeywitness.new(cardanoPubKey, cardanoSig);
     cardanoPubKey.free();
@@ -894,6 +1271,22 @@ export class FireblocksCardanoRawSDK {
     witnesses.free();
 
     const signedTx = Transaction.new(txBody, witnessSet);
+    const signedBody = signedTx.body();
+    const transactionBodyUnchanged = Buffer.from(signedBody.to_bytes()).equals(
+      Buffer.from(txBody.to_bytes())
+    );
+    signedBody.free();
+    if (!transactionBodyUnchanged) {
+      signedTx.free();
+      witnessSet.free();
+      throw new SdkApiError(
+        "The transaction body changed while assembling the Fireblocks witness",
+        500,
+        "GovernanceCorrelationError",
+        { transactionBodyHash: txHashHex },
+        "FireblocksCardanoRawSDK"
+      );
+    }
 
     // Verify the fee is sufficient using Cardano's min_fee calculation
     const minRequiredFee = calculateTransactionFee(signedTx);
@@ -916,7 +1309,29 @@ export class FireblocksCardanoRawSDK {
         `minimum required ${minRequiredFee} lovelace (margin: ${feeDifference} lovelace)`
     );
 
-    return signedTx;
+    const governanceEvidence = governance
+      ? {
+          externalTxId: governance.externalTxId,
+          fireblocksTransactionId: txData.id,
+          fireblocksStatus: txData.transaction.status ?? "UNKNOWN",
+          transactionBodyHash: txHashHex,
+          signedMessageHash: signatureResponse.content!,
+          matchedPolicy: this.validateGovernanceAuthorization(governance, txData.transaction),
+          signatureVerified: true as const,
+          signerMatchesSource: true as const,
+          transactionBodyUnchanged: true as const,
+        }
+      : undefined;
+
+    return { signedTransaction: signedTx, governance: governanceEvidence };
+  }
+
+  /** Existing signing path retained for non-governed operations. */
+  private async signTransaction(
+    txBody: TransactionBody,
+    assetId: SupportedAssets = SupportedAssets.ADA
+  ): Promise<Transaction> {
+    return (await this.signTransactionWithEvidence(txBody, assetId)).signedTransaction;
   }
 
   // ─── Transfer Architecture ──────────────────────────────────────────────────
@@ -929,7 +1344,9 @@ export class FireblocksCardanoRawSDK {
   //    Fee estimation uses the same prepare path so estimates match actuals.
   //
   // 2. ADA (native):
-  //    fireblocksService.createTransfer() - delegates to Fireblocks native transfer.
+  //    Demeter builds locally, signs the exact body hash through Fireblocks RAW,
+  //    then submits through the provider. IAGON retains the native Fireblocks
+  //    transfer path for backward compatibility.
   //    Fee estimation builds locally (prepareAdaTransaction) for preview only;
   //    actual transfer uses Fireblocks co-signing infrastructure.
   //
@@ -1025,6 +1442,7 @@ export class FireblocksCardanoRawSDK {
         tokenName,
         transferAmount: requiredTokenAmount,
         selectedUtxos,
+        protocolParameters: await this.transferProtocolParameters(),
       },
       txInputs,
       ttl,
@@ -1133,9 +1551,7 @@ export class FireblocksCardanoRawSDK {
     try {
       // Log transfer initiation
       if (recipientVaultAccountId) {
-        this.logger.info(
-          `Initiating vault-to-vault transfer: ${requiredTokenAmount} ${tokenName} from vault ${this.vaultAccountId} to vault ${recipientVaultAccountId}`
-        );
+        this.logger.info(`Initiating vault-to-vault transfer: ${requiredTokenAmount} ${tokenName}`);
       } else {
         this.logger.info(
           `Initiating transfer: ${requiredTokenAmount} ${tokenName} to ${options.recipientAddress}`
@@ -1162,7 +1578,7 @@ export class FireblocksCardanoRawSDK {
       const signedTransaction = await this.signTransaction(txBody);
 
       // Submit transaction to blockchain
-      const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+      const txHash = await submitTransaction(this.chainProvider, signedTransaction);
 
       this.logger.info(`Transfer successful: ${txHash} (fee: ${feeFormatted.value} ADA)`);
 
@@ -1189,13 +1605,7 @@ export class FireblocksCardanoRawSDK {
    * Validates inputs, selects UTxOs (preferring ADA-only), and builds the transaction body.
    * Called by both transferAda() and estimateAdaTransactionFee().
    */
-  private async prepareAdaTransaction(params: AdaTransferOpts): Promise<{
-    txBody: TransactionBody;
-    senderAddress: string;
-    resolvedRecipientAddress: string;
-    fee: number;
-    changeTokenAssets: Record<string, number>;
-  }> {
+  private async prepareAdaTransaction(params: AdaTransferOpts): Promise<PreparedAdaTransaction> {
     const {
       index = 0,
       recipientAddress,
@@ -1205,7 +1615,7 @@ export class FireblocksCardanoRawSDK {
     } = params;
 
     // Validate amount
-    if (!Number.isInteger(lovelaceAmount) || lovelaceAmount <= 0) {
+    if (!Number.isSafeInteger(lovelaceAmount) || lovelaceAmount <= 0) {
       throw new SdkApiError(
         "lovelaceAmount must be a positive integer",
         400,
@@ -1235,7 +1645,7 @@ export class FireblocksCardanoRawSDK {
     // Select UTxOs - prefer ADA-only, fall back to multi-asset if needed
     const { selectedUtxos, accumulatedAda, changeTokenAssets, minChangeLovelace } =
       await fetchAndSelectUtxosForAda({
-        iagonApiService: this.iagonApiService,
+        chainProvider: this.chainProvider,
         address: senderAddress,
         lovelaceAmount,
         transactionFee: CardanoAmounts.ESTIMATED_MAX_FEE,
@@ -1286,6 +1696,7 @@ export class FireblocksCardanoRawSDK {
         recipientAddress: recipientAddrAda,
         senderAddress: senderAddrAda,
         selectedUtxos,
+        protocolParameters: await this.transferProtocolParameters(),
       },
       txInputs,
       ttl,
@@ -1294,7 +1705,312 @@ export class FireblocksCardanoRawSDK {
     recipientAddrAda.free();
     senderAddrAda.free();
 
-    return { txBody, senderAddress, resolvedRecipientAddress, fee, changeTokenAssets };
+    return {
+      txBody,
+      senderAddress,
+      resolvedRecipientAddress,
+      fee,
+      changeTokenAssets,
+      selectedUtxos,
+      accumulatedAda,
+    };
+  }
+
+  /** Extract a flat policyId.assetNameHex map from a Cardano output. */
+  private getOutputAssets(output: TransactionOutput): Record<string, number> {
+    const result: Record<string, number> = {};
+    const handles: CardanoWasmHandle[] = [];
+    try {
+      const value = trackCardanoHandle(handles, output.amount());
+      const multiAsset = value.multiasset();
+      if (!multiAsset) return result;
+      trackCardanoHandle(handles, multiAsset);
+
+      const policies = trackCardanoHandle(handles, multiAsset.keys());
+      for (let policyIndex = 0; policyIndex < policies.len(); policyIndex++) {
+        const policy = trackCardanoHandle(handles, policies.get(policyIndex));
+        const assets = multiAsset.get(policy);
+        if (!assets) continue;
+        trackCardanoHandle(handles, assets);
+        const names = trackCardanoHandle(handles, assets.keys());
+        for (let assetIndex = 0; assetIndex < names.len(); assetIndex++) {
+          const name = trackCardanoHandle(handles, names.get(assetIndex));
+          const quantity = assets.get(name);
+          if (!quantity) continue;
+          trackCardanoHandle(handles, quantity);
+          const numericQuantity = Number(quantity.to_str());
+          if (!Number.isSafeInteger(numericQuantity) || numericQuantity < 0) {
+            throw new SdkApiError(
+              "Governance validation encountered an unsafe Cardano asset quantity",
+              500,
+              "GovernanceValidationError",
+              { policyId: policy.to_hex() },
+              "FireblocksCardanoRawSDK"
+            );
+          }
+          const assetName = Buffer.from(name.name()).toString("hex");
+          result[`${policy.to_hex()}.${assetName}`] = numericQuantity;
+        }
+      }
+      return result;
+    } finally {
+      releaseCardanoHandles(handles);
+    }
+  }
+
+  /** Validate the complete locally built Cardano intent before Fireblocks sees a hash. */
+  private validateGovernedAdaPreflight(
+    options: AdaTransferOpts,
+    prepared: PreparedAdaTransaction,
+    requirements: FireblocksGovernanceRequirements,
+    networkEvidence: { providerNetworkMagic: number; expectedNetworkMagic: number }
+  ): FireblocksGovernanceEvidence["preflight"] {
+    if (!requirements.externalTxId?.trim()) {
+      throw new SdkApiError(
+        "governance.externalTxId is required",
+        400,
+        "GovernanceValidationError",
+        undefined,
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (
+      !Array.isArray(requirements.allowedRecipientAddresses) ||
+      !requirements.allowedRecipientAddresses.length
+    ) {
+      throw new SdkApiError(
+        "governance.allowedRecipientAddresses must contain at least one address",
+        400,
+        "GovernanceValidationError",
+        undefined,
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (
+      !Array.isArray(requirements.allowedSignerIds) ||
+      !requirements.allowedSignerIds.length ||
+      requirements.allowedSignerIds.some((signerId) => !signerId?.trim()) ||
+      new Set(requirements.allowedSignerIds).size !== requirements.allowedSignerIds.length
+    ) {
+      throw new SdkApiError(
+        "governance.allowedSignerIds must contain unique, non-empty Fireblocks user IDs",
+        400,
+        "GovernanceValidationError",
+        undefined,
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    if (!requirements.allowedRecipientAddresses.includes(prepared.resolvedRecipientAddress)) {
+      throw new SdkApiError(
+        "Resolved recipient is not present in the governance allowlist",
+        403,
+        "GovernanceRecipientBlocked",
+        { recipientAddress: prepared.resolvedRecipientAddress },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+    for (const [field, value] of [
+      ["maxFeeLovelace", requirements.maxFeeLovelace],
+      ["minimumApprovals", requirements.minimumApprovals],
+      ["minimumSigners", requirements.minimumSigners],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new SdkApiError(
+          `governance.${field} must be a positive safe integer`,
+          400,
+          "GovernanceValidationError",
+          { field, value },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+    }
+    if (prepared.fee > requirements.maxFeeLovelace) {
+      throw new SdkApiError(
+        `Calculated fee ${prepared.fee} exceeds governance maximum ${requirements.maxFeeLovelace}`,
+        403,
+        "GovernanceFeeBlocked",
+        { feeLovelace: prepared.fee, maxFeeLovelace: requirements.maxFeeLovelace },
+        "FireblocksCardanoRawSDK"
+      );
+    }
+
+    const handles: CardanoWasmHandle[] = [];
+    try {
+      let sender: Address;
+      let recipient: Address;
+      try {
+        sender = trackCardanoHandle(handles, Address.from_bech32(prepared.senderAddress));
+        recipient = trackCardanoHandle(
+          handles,
+          Address.from_bech32(prepared.resolvedRecipientAddress)
+        );
+      } catch {
+        throw new SdkApiError(
+          "Sender or recipient is not a valid Cardano bech32 address",
+          400,
+          "GovernanceValidationError",
+          undefined,
+          "FireblocksCardanoRawSDK"
+        );
+      }
+      const expectedNetworkId = this.network === Networks.MAINNET ? 1 : 0;
+      if (
+        sender.network_id() !== expectedNetworkId ||
+        recipient.network_id() !== expectedNetworkId
+      ) {
+        throw new SdkApiError(
+          `Sender and recipient must belong to the configured ${this.network} network`,
+          400,
+          "GovernanceNetworkMismatch",
+          { network: this.network },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+
+      const inputs = trackCardanoHandle(handles, prepared.txBody.inputs());
+      const inputCount = inputs.len();
+      const actualInputs: string[] = [];
+      for (let index = 0; index < inputCount; index++) {
+        const input = trackCardanoHandle(handles, inputs.get(index));
+        const transactionId = trackCardanoHandle(handles, input.transaction_id());
+        actualInputs.push(`${transactionId.to_hex()}#${input.index()}`);
+      }
+      const expectedInputs = prepared.selectedUtxos
+        .map((utxo) => `${utxo.transaction_id}#${utxo.output_index}`)
+        .sort();
+      actualInputs.sort();
+      if (JSON.stringify(actualInputs) !== JSON.stringify(expectedInputs)) {
+        throw new SdkApiError(
+          "Transaction inputs do not match the selected Cardano UTxOs",
+          500,
+          "GovernanceValidationError",
+          { inputCount: actualInputs.length, selectedUtxoCount: expectedInputs.length },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+
+      const outputs = trackCardanoHandle(handles, prepared.txBody.outputs());
+      const outputCount = outputs.len();
+      if (outputCount !== 2) {
+        throw new SdkApiError(
+          "Governed ADA transactions must contain exactly recipient and change outputs",
+          500,
+          "GovernanceValidationError",
+          { outputCount },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+      const recipientOutput = trackCardanoHandle(handles, outputs.get(0));
+      const changeOutput = trackCardanoHandle(handles, outputs.get(1));
+      const recipientOutputAddress = trackCardanoHandle(handles, recipientOutput.address());
+      const changeOutputAddress = trackCardanoHandle(handles, changeOutput.address());
+      const recipientValue = trackCardanoHandle(handles, recipientOutput.amount());
+      const changeValue = trackCardanoHandle(handles, changeOutput.amount());
+      const recipientCoin = trackCardanoHandle(handles, recipientValue.coin());
+      const changeCoin = trackCardanoHandle(handles, changeValue.coin());
+      const recipientLovelace = Number(recipientCoin.to_str());
+      const changeLovelace = Number(changeCoin.to_str());
+      const expectedChange = prepared.accumulatedAda - options.lovelaceAmount - prepared.fee;
+
+      for (const [field, value] of [
+        ["amountLovelace", options.lovelaceAmount],
+        ["feeLovelace", prepared.fee],
+        ["inputLovelace", prepared.accumulatedAda],
+        ["recipientLovelace", recipientLovelace],
+        ["changeLovelace", changeLovelace],
+        ["expectedChangeLovelace", expectedChange],
+      ] as const) {
+        if (!Number.isSafeInteger(value) || value < 0) {
+          throw new SdkApiError(
+            `Governance validation encountered unsafe ${field}`,
+            500,
+            "GovernanceValidationError",
+            { field },
+            "FireblocksCardanoRawSDK"
+          );
+        }
+      }
+
+      if (
+        recipientOutputAddress.to_bech32() !== prepared.resolvedRecipientAddress ||
+        changeOutputAddress.to_bech32() !== prepared.senderAddress ||
+        recipientLovelace !== options.lovelaceAmount ||
+        changeLovelace !== expectedChange
+      ) {
+        throw new SdkApiError(
+          "Transaction outputs do not match the governed recipient, amount, or change intent",
+          500,
+          "GovernanceValidationError",
+          {
+            recipientLovelace,
+            expectedRecipientLovelace: options.lovelaceAmount,
+            changeLovelace,
+            expectedChangeLovelace: expectedChange,
+          },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+
+      const recipientAssets = this.getOutputAssets(recipientOutput);
+      const actualChangeAssets = this.getOutputAssets(changeOutput);
+      const sortRecord = (record: Record<string, number>) =>
+        Object.fromEntries(
+          Object.entries(record).sort(([left], [right]) => left.localeCompare(right))
+        );
+      const assetsPreserved =
+        Object.keys(recipientAssets).length === 0 &&
+        JSON.stringify(sortRecord(actualChangeAssets)) ===
+          JSON.stringify(sortRecord(prepared.changeTokenAssets));
+      if (!assetsPreserved) {
+        throw new SdkApiError(
+          "Native assets were not preserved exactly in the Cardano change output",
+          500,
+          "GovernanceAssetPreservationError",
+          {
+            expectedAssetCount: Object.keys(prepared.changeTokenAssets).length,
+            actualAssetCount: Object.keys(actualChangeAssets).length,
+          },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+
+      const fee = trackCardanoHandle(handles, prepared.txBody.fee());
+      const bodyFee = Number(fee.to_str());
+      if (
+        bodyFee !== prepared.fee ||
+        prepared.accumulatedAda !== options.lovelaceAmount + bodyFee + changeLovelace
+      ) {
+        throw new SdkApiError(
+          "Transaction value conservation or calculated fee validation failed",
+          500,
+          "GovernanceValidationError",
+          {
+            inputLovelace: prepared.accumulatedAda,
+            recipientLovelace,
+            changeLovelace,
+            feeLovelace: bodyFee,
+          },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+
+      return {
+        network: this.network,
+        ...networkEvidence,
+        recipientAllowed: true,
+        amountLovelace: options.lovelaceAmount,
+        feeLovelace: prepared.fee,
+        maxFeeLovelace: requirements.maxFeeLovelace,
+        inputCount,
+        inputLovelace: prepared.accumulatedAda,
+        outputCount,
+        recipientLovelace,
+        changeLovelace,
+        assetsPreserved: true,
+      };
+    } finally {
+      releaseCardanoHandles(handles);
+    }
   }
 
   /**
@@ -1379,8 +2095,97 @@ export class FireblocksCardanoRawSDK {
       } = options;
 
       this.logger.info(
-        `Initiating ADA transfer: ${lovelaceAmount} lovelace to ${recipientAddress ?? `vault ${recipientVaultAccountId}`}`
+        `Initiating ADA transfer: ${lovelaceAmount} lovelace to ${recipientAddress ?? "configured vault"}`
       );
+
+      if (options.governance && this.chainProvider.kind !== "demeter") {
+        throw new SdkApiError(
+          "Strict Fireblocks RAW-signing governance is available only for locally built Demeter ADA transfers",
+          400,
+          "GovernanceProviderUnsupported",
+          { provider: this.chainProvider.kind },
+          "FireblocksCardanoRawSDK"
+        );
+      }
+
+      if (this.chainProvider.kind === "demeter") {
+        const networkEvidence = options.governance
+          ? await this.validateGovernedProviderNetwork()
+          : undefined;
+        const prepared = await this.prepareAdaTransaction(options);
+        const preflight = options.governance
+          ? this.validateGovernedAdaPreflight(
+              options,
+              prepared,
+              options.governance,
+              networkEvidence!
+            )
+          : undefined;
+        const signingResult = await this.signTransactionWithEvidence(
+          prepared.txBody,
+          this.assetId,
+          options.governance,
+          prepared.senderAddress
+        );
+        const signedTransaction = signingResult.signedTransaction;
+        try {
+          const txHash = await submitTransaction(this.chainProvider, signedTransaction).catch(
+            (error: unknown) => {
+              if (
+                signingResult.governance &&
+                error instanceof SdkApiError &&
+                error.errorType === "SubmissionHashMismatch"
+              ) {
+                throw new SdkApiError(
+                  "Demeter submission hash does not match the Fireblocks-signed body",
+                  502,
+                  "GovernanceCorrelationError"
+                );
+              }
+              throw error;
+            }
+          );
+          const demeterSubmissionHashMatchesBody = signingResult.governance
+            ? txHash.toLowerCase() === signingResult.governance.transactionBodyHash.toLowerCase()
+            : undefined;
+          if (signingResult.governance && !demeterSubmissionHashMatchesBody) {
+            throw new SdkApiError(
+              "Demeter returned a transaction hash that does not match the Fireblocks-signed Cardano body",
+              502,
+              "GovernanceCorrelationError",
+              {
+                transactionBodyHash: signingResult.governance.transactionBodyHash,
+                submittedTransactionHash: txHash,
+              },
+              "FireblocksCardanoRawSDK"
+            );
+          }
+          const feeFormatted = formatWithDecimals(prepared.fee, CardanoConstants.ADA_DECIMALS);
+          return {
+            txHash,
+            senderAddress: prepared.senderAddress,
+            recipientAddress: prepared.resolvedRecipientAddress,
+            lovelaceAmount,
+            fee: { lovelace: prepared.fee.toString(), ada: feeFormatted.value },
+            ...(Object.keys(prepared.changeTokenAssets).length > 0 && {
+              tokensPresentedInChange: Object.keys(prepared.changeTokenAssets),
+            }),
+            ...(signingResult.governance &&
+              preflight && {
+                governance: {
+                  ...signingResult.governance,
+                  preflight,
+                  chainProvider: "demeter",
+                  submittedTransactionHash: txHash,
+                  demeterSubmissionHashMatchesBody: true,
+                },
+              }),
+          };
+        } finally {
+          signedTransaction.free();
+          prepared.txBody.free();
+        }
+      }
 
       const senderAddress = await this.getAddressByIndex(this.assetId, index);
       const resolvedRecipientAddress = await this.resolveRecipientAddress(
@@ -1491,7 +2296,7 @@ export class FireblocksCardanoRawSDK {
 
     const { selectedUtxos, accumulatedAda, changeTokenAssets, minChangeLovelace, release } =
       await fetchAndSelectUtxosForMultiToken({
-        iagonApiService: this.iagonApiService,
+        chainProvider: this.chainProvider,
         address: senderAddress,
         tokens,
         transactionFee: CardanoAmounts.ESTIMATED_MAX_FEE,
@@ -1538,6 +2343,7 @@ export class FireblocksCardanoRawSDK {
         senderAddress: senderAddrMT,
         selectedUtxos,
         minRecipientLovelace: lovelaceAmount,
+        protocolParameters: await this.transferProtocolParameters(),
       },
       txInputs,
       ttl,
@@ -1638,7 +2444,7 @@ export class FireblocksCardanoRawSDK {
     let release = () => {};
     try {
       this.logger.info(
-        `Initiating multi-token transfer: ${options.tokens.length} token type(s) to ${options.recipientAddress ?? `vault ${options.recipientVaultAccountId}`}`
+        `Initiating multi-token transfer: ${options.tokens.length} token type(s) to ${options.recipientAddress ?? "configured vault"}`
       );
 
       const {
@@ -1657,7 +2463,7 @@ export class FireblocksCardanoRawSDK {
       );
 
       const signedTransaction = await this.signTransaction(txBody);
-      const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+      const txHash = await submitTransaction(this.chainProvider, signedTransaction);
 
       this.logger.info(
         `Multi-token transfer successful: ${txHash} (fee: ${feeFormatted.value} ADA)`
@@ -1721,7 +2527,7 @@ export class FireblocksCardanoRawSDK {
     const senderAddress = await this.getAddressByIndex(this.assetId, index);
     this.logger.info(`Consolidating UTxOs at address index ${index}: ${senderAddress}`);
 
-    const rawUtxos = await fetchUtxos(this.iagonApiService, senderAddress);
+    const rawUtxos = await fetchUtxos(this.chainProvider, senderAddress);
     const initialUtxos = rawUtxos.filter(
       (u) => !utxoLocks.isLocked(u.transaction_id, u.output_index)
     );
@@ -1763,7 +2569,11 @@ export class FireblocksCardanoRawSDK {
 
       const senderAddrConsolidate = Address.from_bech32(senderAddress);
       const { outputs, fee, txBody } = buildConsolidationTransactionWithCalculatedFee(
-        { senderAddress: senderAddrConsolidate, selectedUtxos: utxos },
+        {
+          senderAddress: senderAddrConsolidate,
+          selectedUtxos: utxos,
+          protocolParameters: await this.transferProtocolParameters(),
+        },
         txInputs,
         ttl,
         WITNESS_COUNT_PAYMENT_KEY_ONLY
@@ -1776,7 +2586,7 @@ export class FireblocksCardanoRawSDK {
       );
 
       const signedTransaction = await this.signTransaction(txBody);
-      const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+      const txHash = await submitTransaction(this.chainProvider, signedTransaction);
       this.logger.info(`UTxO consolidation successful: ${txHash}`);
 
       const { lovelace: outputLovelace, tokenPolicies } = this.extractOutputMetadata(outputs[0]);
@@ -1809,7 +2619,7 @@ export class FireblocksCardanoRawSDK {
 
     for (let batchNum = 0; batchNum < maxBatches; batchNum++) {
       // re-fetch UTxOs after each batch to get fresh state
-      const utxos = await fetchUtxos(this.iagonApiService, senderAddress);
+      const utxos = await fetchUtxos(this.chainProvider, senderAddress);
 
       // stop if we've consolidated enough (only 1 UTxO left or below threshold)
       if (utxos.length < minUtxoCount) {
@@ -1826,7 +2636,11 @@ export class FireblocksCardanoRawSDK {
 
         const senderAddrObj = Address.from_bech32(senderAddress);
         const { fee, txBody } = buildConsolidationTransactionWithCalculatedFee(
-          { senderAddress: senderAddrObj, selectedUtxos: batchUtxos },
+          {
+            senderAddress: senderAddrObj,
+            selectedUtxos: batchUtxos,
+            protocolParameters: await this.transferProtocolParameters(),
+          },
           txInputs,
           ttl,
           WITNESS_COUNT_PAYMENT_KEY_ONLY
@@ -1839,7 +2653,7 @@ export class FireblocksCardanoRawSDK {
         );
 
         const signedTransaction = await this.signTransaction(txBody);
-        const txHash = await submitTransaction(this.iagonApiService, signedTransaction);
+        const txHash = await submitTransaction(this.chainProvider, signedTransaction);
 
         batches.push({
           txHash,
@@ -1876,7 +2690,7 @@ export class FireblocksCardanoRawSDK {
     }
 
     // get final state for output metadata
-    const finalUtxos = await fetchUtxos(this.iagonApiService, senderAddress);
+    const finalUtxos = await fetchUtxos(this.chainProvider, senderAddress);
     const tokenPolicies = this.extractTokenPoliciesFromUtxos(finalUtxos);
     const totalLovelace = finalUtxos.reduce((sum, u) => sum + u.value.lovelace, 0);
     const totalFeeFormatted = formatWithDecimals(totalFeeLovelace, CardanoConstants.ADA_DECIMALS);
@@ -2141,7 +2955,7 @@ export class FireblocksCardanoRawSDK {
 
     this.logger.info(`Enriching webhook payload for ADA transaction: ${txHash}`);
 
-    const detailedTx = await this.iagonApiService.getTransactionDetails(txHash);
+    const detailedTx = await this.chainProvider.getTransactionDetails(txHash);
 
     if (!detailedTx) {
       this.logger.warn(`Transaction not found: ${txHash}`);
@@ -2216,7 +3030,9 @@ export class FireblocksCardanoRawSDK {
           return null;
         }
 
-        const assetInfo = await this.iagonApiService.getAssetInfo(policyId, assetName);
+        const assetInfo = await this.requireIagonProvider(
+          ChainProviderCapability.ASSET_METADATA
+        ).getAssetInfo(policyId, assetName);
         const amount = amounts.get(assetId) || "0";
         const decimals = assetInfo.data.metadata?.decimals || 0;
         const amountNumber = Number(amount);
@@ -2232,10 +3048,8 @@ export class FireblocksCardanoRawSDK {
         };
 
         return { assetId, metadata };
-      } catch (error: unknown) {
-        this.logger.warn(
-          `Failed to fetch metadata for ${assetId}: ${error instanceof Error ? error.message : String(error)}`
-        );
+      } catch {
+        this.logger.warn(`Failed to fetch metadata for ${assetId}`);
         return null;
       }
     });
@@ -2626,7 +3440,7 @@ export class FireblocksCardanoRawSDK {
    * @internal - For advanced usage only
    */
   public getIagonApiService(): IagonApiService {
-    return this.iagonApiService;
+    return this.requireIagonProvider(ChainProviderCapability.IAGON_COMPATIBILITY);
   }
 
   /**
@@ -2634,7 +3448,7 @@ export class FireblocksCardanoRawSDK {
    * @internal - For advanced usage only
    */
   public getStakingService(): StakingService {
-    return this.stakingService;
+    return this.requireStakingService();
   }
 
   // ======================
@@ -2666,8 +3480,8 @@ export class FireblocksCardanoRawSDK {
   ): Promise<
     (StakingTransactionResult & { stakeAddress: string; addressIndex: number }) | null
   > => {
-    this.logger.info(`Registering staking credential for vault account ${options.vaultAccountId}`);
-    return await this.stakingService.registerStakingCredential(options);
+    this.logger.info("Registering staking credential");
+    return await this.requireStakingService().registerStakingCredential(options);
   };
 
   /**
@@ -2691,13 +3505,11 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public delegateToPool = async (options: DelegationOptions): Promise<StakingTransactionResult> => {
-    this.logger.info(
-      `Delegating to pool ${options.poolId} for vault account ${options.vaultAccountId}`
-    );
+    this.logger.info("Delegating staking credential to pool");
 
     const { vaultAccountId, poolId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    return await this.stakingService.delegateToPool({ vaultAccountId, poolId, fee });
+    return await this.requireStakingService().delegateToPool({ vaultAccountId, poolId, fee });
   };
 
   /**
@@ -2722,12 +3534,10 @@ export class FireblocksCardanoRawSDK {
   public deregisterStakingCredential = async (
     options: DeregisterStakingOptions
   ): Promise<StakingTransactionResult> => {
-    this.logger.info(
-      `Deregistering staking credential for vault account ${options.vaultAccountId}`
-    );
+    this.logger.info("Deregistering staking credential");
     const { vaultAccountId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    return await this.stakingService.deregisterStakingCredential({ vaultAccountId, fee });
+    return await this.requireStakingService().deregisterStakingCredential({ vaultAccountId, fee });
   };
 
   /**
@@ -2764,22 +3574,24 @@ export class FireblocksCardanoRawSDK {
       rewardAmount?: number;
     }
   > => {
-    this.logger.info(`Withdrawing rewards for vault account ${options.vaultAccountId}`);
+    this.logger.info("Withdrawing staking rewards");
     const { vaultAccountId, limit, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    return await this.stakingService.withdrawRewards({ vaultAccountId, limit, fee });
+    return await this.requireStakingService().withdrawRewards({ vaultAccountId, limit, fee });
   };
 
   public getStakeAccountInfo = async (vaultAccountId: string): Promise<StakeAccountInfo> => {
-    this.logger.info(`Getting staking account info for vault account ${vaultAccountId}`);
+    this.logger.info("Getting staking account info");
 
-    const stakeAddress = await this.stakingService.getStakeAddress(vaultAccountId);
-    const response = await this.iagonApiService.getStakeAccountInfo(stakeAddress);
+    const stakeAddress = await this.requireStakingService().getStakeAddress(vaultAccountId);
+    const response = await this.requireIagonProvider(
+      ChainProviderCapability.STAKING
+    ).getStakeAccountInfo(stakeAddress);
     return response.data;
   };
 
   public getCurrentEpoch = async (): Promise<CurrentEpochResponse> => {
-    return await this.iagonApiService.getCurrentEpoch();
+    return await this.requireIagonProvider(ChainProviderCapability.STAKING).getCurrentEpoch();
   };
 
   /**
@@ -2808,8 +3620,8 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public queryStakingRewards = async (vaultAccountId: string): Promise<RewardsData> => {
-    this.logger.info(`Querying staking rewards for vault account ${vaultAccountId}`);
-    return await this.stakingService.queryStakingRewards(vaultAccountId);
+    this.logger.info("Querying staking rewards");
+    return await this.requireStakingService().queryStakingRewards(vaultAccountId);
   };
 
   /**
@@ -2873,8 +3685,10 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public registerAsDRep = async (options: RegisterAsDRepOptions): Promise<RegisterAsDRepResult> => {
-    this.logger.info(`Registering vault account ${options.vaultAccountId} as a DRep`);
-    return await this.stakingService.registerAsDRep(options);
+    this.logger.info("Registering configured vault as a DRep");
+    return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).registerAsDRep(
+      options
+    );
   };
 
   /**
@@ -2903,19 +3717,22 @@ export class FireblocksCardanoRawSDK {
     this.logger.info(
       `Casting vote "${options.vote}" on governance action ${options.governanceActionId.txHash}#${options.governanceActionId.index}`
     );
-    return await this.stakingService.castVote(options);
+    return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).castVote(options);
   };
 
   public delegateToDRep = async (
     options: DRepDelegationOptions
   ): Promise<StakingTransactionResult> => {
-    this.logger.info(
-      `Delegating to DRep (${options.drepAction}) for vault account ${options.vaultAccountId}`
-    );
+    this.logger.info(`Delegating staking credential to DRep (${options.drepAction})`);
 
     const { vaultAccountId, drepAction, drepId, fee = CardanoAmounts.GOVERNANCE_TX_FEE } = options;
 
-    return await this.stakingService.delegateToDRep({ vaultAccountId, drepAction, drepId, fee });
+    return await this.requireStakingService(ChainProviderCapability.GOVERNANCE).delegateToDRep({
+      vaultAccountId,
+      drepAction,
+      drepId,
+      fee,
+    });
   };
 
   /**
@@ -2937,8 +3754,8 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public getStakeAddress = async (vaultAccountId: string): Promise<string> => {
-    this.logger.info(`Getting stake address for vault account ${vaultAccountId}`);
-    return await this.stakingService.getStakeAddress(vaultAccountId);
+    this.logger.info("Getting stake address");
+    return await this.requireStakingService().getStakeAddress(vaultAccountId);
   };
 
   /**
@@ -2981,7 +3798,11 @@ export class FireblocksCardanoRawSDK {
     skipCache: boolean = false
   ): Promise<AssetInfoResponse> {
     this.logger.info(`Getting asset info for ${policyId}.${assetName}`);
-    return await this.iagonApiService.getAssetInfo(policyId, assetName, skipCache);
+    return await this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).getAssetInfo(
+      policyId,
+      assetName,
+      skipCache
+    );
   }
 
   /**
@@ -2994,7 +3815,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolInfo(poolId: string): Promise<PoolInfoResponse> {
     this.logger.info(`Getting pool info for ${poolId}`);
-    return await this.iagonApiService.getPoolInfo(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolInfo(poolId);
   }
 
   /**
@@ -3003,7 +3824,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolMetadata(poolId: string): Promise<PoolMetadataResponse> {
     this.logger.info(`Getting pool metadata for ${poolId}`);
-    return await this.iagonApiService.getPoolMetadata(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolMetadata(poolId);
   }
 
   /**
@@ -3012,7 +3833,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolDelegators(poolId: string): Promise<PoolDelegatorsResponse> {
     this.logger.info(`Getting pool delegators for ${poolId}`);
-    return await this.iagonApiService.getPoolDelegators(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolDelegators(poolId);
   }
 
   /**
@@ -3027,7 +3848,11 @@ export class FireblocksCardanoRawSDK {
     offset?: number
   ): Promise<PoolDelegatorsListResponse> {
     this.logger.info(`Getting pool delegators list for ${poolId}`);
-    return await this.iagonApiService.getPoolDelegatorsList(poolId, limit, offset);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolDelegatorsList(
+      poolId,
+      limit,
+      offset
+    );
   }
 
   /**
@@ -3036,7 +3861,7 @@ export class FireblocksCardanoRawSDK {
    */
   public async getPoolBlocks(poolId: string): Promise<PoolBlocksResponse> {
     this.logger.info(`Getting pool blocks for ${poolId}`);
-    return await this.iagonApiService.getPoolBlocks(poolId);
+    return await this.requireIagonProvider(ChainProviderCapability.POOLS).getPoolBlocks(poolId);
   }
 
   /**
@@ -3057,7 +3882,10 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public clearAssetInfoCache(policyId?: string, assetName?: string): void {
-    this.iagonApiService.clearAssetInfoCache(policyId, assetName);
+    this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).clearAssetInfoCache(
+      policyId,
+      assetName
+    );
   }
 
   /**
@@ -3074,7 +3902,7 @@ export class FireblocksCardanoRawSDK {
    * ```
    */
   public getAssetCacheStats() {
-    return this.iagonApiService.getAssetCacheStats();
+    return this.requireIagonProvider(ChainProviderCapability.ASSET_METADATA).getAssetCacheStats();
   }
 
   /**

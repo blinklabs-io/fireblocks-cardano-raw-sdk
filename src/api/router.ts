@@ -32,6 +32,8 @@ export const configureRouter = (sdkManager: SdkManager): Router => {
   const router: Router = Router();
   const apiController = new ApiController(sdkManager);
 
+  router.get("/services/provider/health", apiController.getProviderHealth);
+
   /**
    * IAGON HEALTH CHECK
    */
@@ -1283,6 +1285,7 @@ export const configureRouter = (sdkManager: SdkManager): Router => {
    * @swagger
    * /api/transfers:
    *   post:
+   *     security: []
    *     summary: Execute a transfer
    *     description: |
    *       Executes a transfer of tokens between accounts.

@@ -1,5 +1,18 @@
 import { sanitizeForLogging } from "./sanitizer.js";
 
+/** Keep one caller-controlled value from forging a second log record or terminal control. */
+const escapeLogText = (value: string): string =>
+  Array.from(value, (character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || (code >= 127 && code <= 159) || code === 0x2028 || code === 0x2029
+      ? `\\u${code.toString(16).padStart(4, "0")}`
+      : character;
+  })
+    .join("")
+    // Explicit postcondition for static analyzers and future formatter changes:
+    // no caller-controlled CR/LF may reach a plain-text log sink.
+    .replace(/\n|\r/g, "");
+
 export enum LogLevel {
   DEBUG = 0,
   INFO = 1,
@@ -19,7 +32,7 @@ export class Logger {
    * @param context The context for this logger (e.g. class name)
    */
   constructor(context: string) {
-    this.context = context;
+    this.context = escapeLogText(context);
   }
 
   /**
@@ -80,11 +93,50 @@ export class Logger {
    * @param args Arguments to sanitize
    * @returns Sanitized arguments
    */
-  private sanitizeArgs(args: unknown[]): unknown[] {
-    if (!Logger.sanitizeLogs) {
-      return args;
-    }
-    return args.map((arg) => sanitizeForLogging(arg, Logger.customSensitiveKeys));
+  private sanitizeArgs(args: unknown[]): string[] {
+    return args.map((arg) => {
+      if (typeof arg === "string") return escapeLogText(arg);
+      if (arg instanceof Error) {
+        return JSON.stringify({
+          name: escapeLogText(arg.name),
+          message: escapeLogText(arg.message),
+        });
+      }
+
+      const sanitized = Logger.sanitizeLogs
+        ? sanitizeForLogging(arg, Logger.customSensitiveKeys)
+        : arg;
+      if (sanitized === null || sanitized === undefined) return String(sanitized);
+      if (
+        typeof sanitized === "number" ||
+        typeof sanitized === "boolean" ||
+        typeof sanitized === "bigint"
+      ) {
+        return String(sanitized);
+      }
+      if (typeof sanitized === "function" || typeof sanitized === "symbol") {
+        return `[${typeof sanitized}]`;
+      }
+
+      try {
+        const serialized = JSON.stringify(sanitized, (_key, value: unknown) => {
+          if (value instanceof Error) {
+            return {
+              name: escapeLogText(value.name),
+              message: escapeLogText(value.message),
+            };
+          }
+          if (typeof value === "bigint") return value.toString();
+          if (typeof value === "function" || typeof value === "symbol") {
+            return `[${typeof value}]`;
+          }
+          return value;
+        });
+        return escapeLogText(serialized ?? `[${typeof sanitized}]`);
+      } catch {
+        return "[Unserializable value]";
+      }
+    });
   }
   /**
    * Log a debug message
@@ -95,7 +147,7 @@ export class Logger {
     if (Logger.level <= LogLevel.DEBUG) {
       const sanitizedArgs = this.sanitizeArgs(args);
       console.log(
-        `[${this.getTimestamp()}] [DEBUG] [${this.context}] ${message}`,
+        `[${this.getTimestamp()}] [DEBUG] [${this.context}] ${escapeLogText(message)}`,
         ...sanitizedArgs
       );
     }
@@ -109,7 +161,10 @@ export class Logger {
   info(message: string, ...args: unknown[]): void {
     if (Logger.level <= LogLevel.INFO) {
       const sanitizedArgs = this.sanitizeArgs(args);
-      console.log(`[${this.getTimestamp()}] [INFO] [${this.context}] ${message}`, ...sanitizedArgs);
+      console.log(
+        `[${this.getTimestamp()}] [INFO] [${this.context}] ${escapeLogText(message)}`,
+        ...sanitizedArgs
+      );
     }
   }
 
@@ -122,7 +177,7 @@ export class Logger {
     if (Logger.level <= LogLevel.WARN) {
       const sanitizedArgs = this.sanitizeArgs(args);
       console.warn(
-        `[${this.getTimestamp()}] [WARN] [${this.context}] ${message}`,
+        `[${this.getTimestamp()}] [WARN] [${this.context}] ${escapeLogText(message)}`,
         ...sanitizedArgs
       );
     }
@@ -137,7 +192,7 @@ export class Logger {
     if (Logger.level <= LogLevel.ERROR) {
       const sanitizedArgs = this.sanitizeArgs(args);
       console.error(
-        `[${this.getTimestamp()}] [ERROR] [${this.context}] ${message}`,
+        `[${this.getTimestamp()}] [ERROR] [${this.context}] ${escapeLogText(message)}`,
         ...sanitizedArgs
       );
     }

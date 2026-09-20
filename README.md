@@ -1,1431 +1,438 @@
-# Cardano Raw SDK
+<div align="center">
 
-A TypeScript SDK for managing Cardano token transfers through Fireblocks, with integrated Iagon API services for balance queries, transaction history, and token operations.
+# Fireblocks Cardano Raw SDK
 
-## Features
+**Build and sign Cardano transactions with Fireblocks, then choose IAGON or
+Demeter for Cardano chain access.**
 
-- 🔐 **Fireblocks Integration**: Secure vault account management and transaction signing
-- 🏦 **Balance Queries**: Check balances by address, credential, or stake key
-- 💸 **Token Transfers**: Execute Cardano token transfers with automatic UTXO selection
-  - Native ADA transfers
-  - Single token (CNT) transfers
-  - Multi-token transfers (multiple tokens in one transaction)
-  - Address-to-address transfers
-  - Vault-to-vault transfers for seamless internal operations
-- 💰 **Fee Estimation**: Accurate fee calculation for ADA, single-token, and multi-token transfers
-- 🔧 **UTxO Management**: Consolidate fragmented UTxOs to optimize wallet efficiency
-- 🗳️ **Governance Operations**: Full Conway-era governance support
-  - Register as a DRep (Delegated Representative)
-  - Cast votes on governance actions
-  - Delegate voting power to DReps
-- 🏊 **Staking Operations**: Complete staking lifecycle management
-  - Register/deregister stake keys
-  - Delegate to stake pools
-  - Withdraw rewards
-- 📊 **Transaction History**: Retrieve basic and detailed transaction history with pagination
-- 🏊 **Pool Information**: Query stake pool metadata, delegators, and blocks
-- 🔄 **Connection Pooling**: Efficient SDK instance management with automatic cleanup
-- 🌐 **Multi-Network Support**: Works with Cardano mainnet, preprod, and preview networks
-- 🚀 **REST API Server**: Optional Express server for HTTP-based operations
-- 🐳 **Docker Support**: Easy deployment with Docker and Docker Compose
+[![CI](https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/actions/workflows/ci.yml)
+[![Node 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white)](package.json)
+[![Providers](https://img.shields.io/badge/provider-IAGON%20%7C%20Demeter-6f42c1)](#provider-wiring)
 
-## Table of Contents
+[Runnable Demeter POC](https://github.com/verbotenj/cardano-raw-sdk-demeter-poc) ·
+[Security policy](SECURITY.md) · [Generated API reference](docs/index.html)
 
-- [Installation](#installation)
-- [Usage Methods](#usage-methods)
-  - [Method 1: TypeScript SDK](#method-1-typescript-sdk)
-  - [Method 2: REST API Service](#method-2-rest-api-service)
-- [Configuration](#configuration)
-- [API Documentation](#api-documentation)
-- [Examples](#examples)
-- [Development](#development)
+</div>
+
+> [!WARNING]
+> This repository is a proof-of-concept fork, not an audited production custody
+> product. Fireblocks RAW signing can authorize arbitrary payloads and is
+> disabled by default in production workspaces. Configure Fireblocks policies,
+> use testnet first, and read [Security](#security) before deploying anything.
+
+## What changed in this fork
+
+The original SDK talked directly to IAGON. This fork introduces a small
+`CardanoDataProvider` contract so the core transfer path can use either:
+
+- `IagonApiService`, preserving the original broad feature set; or
+- `DemeterBlockfrostProvider`, providing the complete ADA-transfer data path
+  through Demeter's Blockfrost-compatible API.
+
+Fireblocks and the chain provider have different jobs. Fireblocks protects the
+key and applies signing policy. IAGON or Demeter reads Cardano state and submits
+the already-signed transaction. Cardano is the final settlement record.
+
+## Provider wiring
+
+```mermaid
+flowchart LR
+  APP[Application] --> SDK[FireblocksCardanoRawSDK]
+  SDK --> FB[Fireblocks<br/>address + RAW signing]
+  SDK --> CHOICE{chainProvider.type}
+  CHOICE -->|iagon| IAGON[IagonApiService]
+  CHOICE -->|demeter| DEMETER[DemeterBlockfrostProvider]
+  IAGON --> CARDANO[(Cardano)]
+  DEMETER --> CARDANO
+```
+
+The shared core contract covers provider health, address balance, UTxOs,
+current slot, binary transaction submission, and confirmation by hash. The SDK
+checks provider capabilities before invoking an extended operation.
+
+### Verified transfer-boundary checks
+
+Demeter wallet scans are bounded, reject duplicate outputs and malformed asset
+units, and fail if a later page disappears. Authenticated requests do not follow
+redirects. Transient reads have bounded retries; transaction POSTs are not blindly
+retried. The shared submission helper checks the returned hash against the local
+body hash. An ambiguous submission is reconciled only if that exact hash is
+already visible on-chain; otherwise it reports an unknown outcome.
+
+`getTransactionDetails()` remains a lightweight polling lookup (`utxosComplete:
+false` for Demeter). `getFullTransactionDetails()` additionally fetches actual
+inputs/outputs, preserving reference/collateral flags and failing on unavailable
+UTxO data. It is a separate optional provider operation, not general history support.
+
+Demeter SDK ADA, CNT, multi-token and consolidation paths now fetch a fresh
+network-bound protocol snapshot for each build. Fees, output-byte cost and maximum
+transaction size use that snapshot. Direct builder callers must pass
+`protocolParameters` to opt in; omission retains legacy IAGON constants. Snapshots
+expire after five minutes. Fee sizing still conservatively estimates key-witness
+overhead; this is not a Plutus execution-cost estimator. Staking/governance builders
+and the legacy standalone `calculateTransactionFee()` utility are not migrated.
+
+Local regressions live in `src/__tests__/services/demeter-safety.test.ts` and
+`src/__tests__/utils/transfer-verification.test.ts`. Live Preview acceptance logs
+are maintained in the companion POC's `proofs/qa-compatibility/` directory.
+
+### Indexed reads: history, assets, accounts and pools
+
+`sdk.getChainQueries()` exposes the same narrow read interface for either selected
+provider. Standalone applications can use `provider.queries` without initializing
+Fireblocks. This does not change the old IAGON-specific SDK methods or enable
+Demeter staking/governance transactions.
+
+```typescript
+const reads = sdk.getChainQueries(); // after SDK initialization
+const page = await reads.addressHistory(address, { count: 10, details: "full" });
+const asset = await reads.assetDetails(policyId + assetNameHex);
+const account = await reads.stakeAccount(stakeAddress);
+const addresses = await reads.stakeAddresses(stakeAddress, { page: 1, count: 25 });
+const rewards = await reads.stakeRewards(stakeAddress, { page: 1, count: 25 });
+const metadata = await reads.poolMetadata(poolId);
+const delegators = await reads.poolDelegators(poolId, { page: 1, count: 25 });
+```
+
+- `supportedOperations` lists individual implemented read operations, not a
+  guarantee that every deployment implements them. A Demeter HTTP 501 becomes
+  `ChainReadUnsupportedError` and is not retried.
+- Pages use `page`/`count`; count is 1–100 and page is 1–1000. Full-history pages
+  are limited to 25 and hydrate transactions sequentially. A missing or
+  inconsistent transaction fails the page, not a partial success.
+- Demeter history is newest-first. Other list ordering is provider-defined.
+  Demeter totals are `null`; `nextPage` on a full page is a continuation to try,
+  not proof of more results. `collectChainPages()` provides bounded collection
+  with duplicate detection. Empty/short pages do not prove complete archive retention.
+- `fromBlock`/`toBlock` are **block heights**, supported only by the Demeter
+  query adapter. A `fromSlot` property is rejected rather than silently reinterpreted;
+  IAGON's existing slot-based history API remains separate.
+- Supply/reward/stake amounts are decimal strings. Combined mint/burn counts
+  are not split, controlled ADA is not called active stake, and unknown
+  registration/epoch/metadata fields stay `null`. Metadata is untrusted data;
+  escape it when displaying it and do not automatically follow its URLs.
+
+This covers paged per-address history, basic asset information, account/reward
+reads and individual pool metadata/delegators. It does not add vault-wide history,
+credential ownership inference, rich webhook metadata enrichment, account asset
+aggregation, registration/delegation history, pool aggregates/validation, or
+staking/governance writes. Both provider adapters have local HTTP contract tests;
+live acceptance is Demeter Preview only, not live IAGON or Fireblocks.
 
 ## Installation
 
-### Prerequisites
-
-- Node.js 18+ (for SDK usage)
-- Docker & Docker Compose (for API service deployment)
-- Fireblocks API credentials
-- Iagon API key (required for balance queries, transaction history, and transfers)
-
-### Install as a TypeScript Package
-
-**Install from GitHub** (for use as a dependency in your project):
+Node.js 20 or newer is required.
 
 ```bash
-# Install directly from GitHub
-npm install github:fireblocks/cardano-raw-sdk
-
-# Or install a specific branch/tag
-npm install github:fireblocks/cardano-raw-sdk#main
-npm install github:fireblocks/cardano-raw-sdk#v1.0.0
+git clone https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk.git
+cd fireblocks-cardano-raw-sdk
+npm ci
+npm run quality
 ```
 
-**Or clone for development**:
+This fork is not published to npm. An application can pin an immutable HTTPS
+archive. The repository tracks compiled `dist/` files so archive installation
+does not execute build tools:
 
-```bash
-git clone https://github.com/fireblocks/cardano-raw-sdk.git
-cd cardano-raw-sdk
-npm install
-npm run build
+```json
+{
+  "dependencies": {
+    "cardano-raw-sdk": "https://github.com/blinklabs-io/fireblocks-cardano-raw-sdk/archive/COMMIT_SHA.tar.gz"
+  }
+}
 ```
 
-## Usage Methods
+Import all public values and types from the package root:
 
-### Method 1: TypeScript SDK
+```ts
+import {
+  FireblocksCardanoRawSDK,
+  Networks,
+  ProviderCapabilityError,
+  SdkApiError,
+} from "cardano-raw-sdk";
+import { BasePath } from "@fireblocks/ts-sdk";
+```
 
-Use the SDK directly in your TypeScript/JavaScript application.
+Do not import `cardano-raw-sdk/types`; that subpath is not exported.
 
-#### Basic Setup
+## Create an SDK instance
 
-```typescript
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks, SupportedAssets } from "cardano-raw-sdk/types";
+### Demeter
+
+```ts
+import { FireblocksCardanoRawSDK, Networks } from "cardano-raw-sdk";
 import { BasePath } from "@fireblocks/ts-sdk";
 
-// Initialize the SDK
 const sdk = await FireblocksCardanoRawSDK.createInstance({
   fireblocksConfig: {
-    apiKey: "your-fireblocks-api-key",
-    secretKey: "your-fireblocks-secret-key",
+    apiKey: process.env.FIREBLOCKS_API_USER_KEY!,
+    secretKey: process.env.FIREBLOCKS_API_USER_SECRET_KEY!,
     basePath: BasePath.US,
   },
-  vaultAccountId: "your-vault-account-id",
-  network: Networks.MAINNET,
-  iagonApiKey: "your-iagon-api-key",
-});
-```
-
-#### Get Balance
-
-```typescript
-// Get balance by address
-const balance = await sdk.getBalanceByAddress({
-  index: 0,
-  groupByPolicy: false,
-});
-
-console.log("Balance:", balance);
-
-// Get balance by stake key
-const stakeBalance = await sdk.getBalanceByStakeKey({
-  stakeKey: "stake1u8a9qstrmj...",
-  groupByPolicy: true,
-});
-```
-
-#### Transfer Native ADA
-
-Transfer ADA without any tokens:
-
-```typescript
-const result = await sdk.transferAda({
-  index: 0, // Source address index
-  recipientAddress: "addr1qxy...",
-  adaAmount: 5000000, // 5 ADA in lovelace
-});
-
-console.log("Transaction Hash:", result.txHash);
-console.log("Sender Address:", result.senderAddress);
-console.log("Fee:", result.fee.ada, "ADA");
-```
-
-#### Transfer Single Token (CNT)
-
-The SDK supports two transfer modes:
-
-**1. Transfer to a Cardano Address**
-
-```typescript
-const transferResult = await sdk.transfer({
-  index: 0,
-  recipientAddress: "addr1qxy...",
-  tokenPolicyId: "f0ff48bbb7bbe9d5...",
-  tokenName: "4e49...",
-  requiredTokenAmount: 1000000,
-});
-
-console.log("Transaction Hash:", transferResult.txHash);
-console.log("Sender Address:", transferResult.senderAddress);
-console.log("Fee:", transferResult.fee.ada, "ADA"); // e.g., "0.170000 ADA"
-console.log("Fee (lovelace):", transferResult.fee.lovelace); // e.g., "170000"
-```
-
-**2. Vault-to-Vault Transfer**
-
-```typescript
-const transferResult = await sdk.transfer({
-  index: 0, // Source address index
-  recipientVaultAccountId: "1", // Destination vault account
-  recipientIndex: 0, // Destination address index (optional, defaults to 0)
-  tokenPolicyId: "f0ff48bbb7bbe9d5...",
-  tokenName: "4e49...",
-  requiredTokenAmount: 1000000,
-});
-
-console.log("Transaction Hash:", transferResult.txHash);
-console.log("Sender Address:", transferResult.senderAddress);
-console.log("Fee:", transferResult.fee.ada, "ADA"); // e.g., "0.170000 ADA"
-```
-
-**Note**: You must provide exactly one of `recipientAddress` or `recipientVaultAccountId`, not both.
-
-#### Transfer Multiple Tokens
-
-Transfer multiple different tokens in a single transaction:
-
-```typescript
-const result = await sdk.transferMultipleTokens({
-  index: 0,
-  recipientAddress: "addr1qxy...",
-  tokens: [
-    {
-      policyId: "f0ff48bbb7bbe9d5...",
-      assetName: "4e4654",
-      amount: 1000000,
-    },
-    {
-      policyId: "a1b2c3d4e5f6...",
-      assetName: "544f4b454e",
-      amount: 500000,
-    },
-  ],
-  includeAda: true, // Optional: include extra ADA in the transfer
-  adaAmount: 2000000, // 2 ADA in lovelace (required if includeAda is true)
-});
-
-console.log("Transaction Hash:", result.txHash);
-console.log("Fee:", result.fee.ada, "ADA");
-```
-
-**Estimate multi-token transfer fee:**
-
-```typescript
-const feeEstimate = await sdk.estimateMultiTokenTransactionFee({
-  index: 0,
-  recipientAddress: "addr1qxy...",
-  tokens: [
-    { policyId: "f0ff48bbb...", assetName: "4e4654", amount: 1000000 },
-    { policyId: "a1b2c3d4e5f6...", assetName: "544f4b454e", amount: 500000 },
-  ],
-});
-
-console.log("Estimated Fee:", feeEstimate.fee.ada, "ADA");
-```
-
-#### Consolidate UTxOs
-
-Consolidate fragmented UTxOs to optimize your wallet:
-
-```typescript
-const result = await sdk.consolidateUtxos({
-  index: 0,
-  targetAddress: "addr1qxy...", // Optional: defaults to source address
-});
-
-console.log("Transaction Hash:", result.txHash);
-console.log("Consolidated", result.inputCount, "UTxOs");
-console.log("Fee:", result.fee.ada, "ADA");
-```
-
-#### Transaction History
-
-```typescript
-// Get basic transaction history
-const history = await sdk.getTransactionHistory({
-  index: 0,
-  limit: 10,
-  offset: 0,
-  fromSlot: 100000,
-});
-
-// Get detailed transaction history with inputs/outputs
-const detailedHistory = await sdk.getDetailedTxHistory({
-  index: 0,
-  limit: 10,
-  offset: 0,
-});
-
-// Get transaction details by hash
-const txDetails = await sdk.getTransactionDetails("6c9e6d70a0ce7ca5d...");
-```
-
-#### Asset Information
-
-```typescript
-// Get detailed asset information including metadata and decimals
-const assetInfo = await sdk.getAssetInfo(
-  "f0ff48bbb7bbe9d59a40f1ce90e9e9d0ff5002ec48f232b49ca0fb9a", // Policy ID
-  "4e4654" // Asset name (hex)
-);
-
-console.log("Token Name:", assetInfo.data.metadata?.name);
-console.log("Ticker:", assetInfo.data.metadata?.ticker);
-console.log("Decimals:", assetInfo.data.metadata?.decimals);
-console.log("Total Supply:", assetInfo.data.total_supply);
-console.log("Logo:", assetInfo.data.metadata?.logo);
-
-// Use decimals to format token amounts correctly
-const rawAmount = 1000000;
-const decimals = assetInfo.data.metadata?.decimals || 0;
-const formattedAmount = rawAmount / Math.pow(10, decimals);
-console.log(`Amount: ${formattedAmount} ${assetInfo.data.metadata?.ticker}`);
-```
-
-#### Governance Operations
-
-**Register as a DRep (Delegated Representative)**
-
-```typescript
-const result = await sdk.registerAsDRep({
-  vaultAccountId: "your-vault-id",
-  index: 0,
-  anchor: {
-    url: "https://example.com/drep-metadata.json",
-    dataHash: "abc123...", // Blake2b-256 hash of the metadata
+  vaultAccountId: process.env.FIREBLOCKS_VAULT_ACCOUNT_ID!,
+  network: Networks.PREVIEW,
+  chainProvider: {
+    type: "demeter",
+    baseUrl: process.env.DEMETER_BLOCKFROST_URL!,
+    apiKey: process.env.DEMETER_API_KEY!,
   },
 });
 
-console.log("Transaction Hash:", result.txHash);
-console.log("DRep ID:", result.drepId);
-// Note: Requires 500 ADA deposit
+await sdk.checkProviderHealth();
 ```
 
-**Cast a Governance Vote (as a DRep)**
+The tested Demeter resource authenticates with `dmtr-api-key`; the provider adds
+that header and sends signed transaction bytes as `application/cbor`. Use the
+URL and authentication instructions shown for your own Demeter resource rather
+than assuming every Demeter product has the same endpoint shape.
 
-```typescript
-const result = await sdk.castGovernanceVote({
-  vaultAccountId: "your-vault-id",
-  index: 0,
-  governanceActionTxHash: "abc123...",
-  governanceActionIndex: 0,
-  vote: "yes", // "yes", "no", or "abstain"
+### IAGON
+
+```ts
+const sdk = await FireblocksCardanoRawSDK.createInstance({
+  fireblocksConfig,
+  vaultAccountId: "0",
+  network: Networks.MAINNET,
+  chainProvider: {
+    type: "iagon",
+    apiKey: process.env.IAGON_API_KEY!,
+  },
+});
+```
+
+The deprecated `iagonApiKey` initialization field is retained for source
+compatibility. New integrations should use `chainProvider` explicitly.
+
+## Verified provider coverage
+
+“Supported” means the implementation and automated tests exist. “Live proof”
+means the companion POC contains a confirmed Cardano Preview receipt. It does
+not mean every method has been independently security-audited.
+
+| Capability                                                       | IAGON     | Demeter                                    |
+| ---------------------------------------------------------------- | --------- | ------------------------------------------ |
+| Provider health                                                  | Supported | Supported; live-read proof                 |
+| Address balance and policy grouping                              | Supported | Supported; live-read proof                 |
+| UTxO lookup and multi-asset normalization                        | Supported | Supported; live-read proof                 |
+| Current slot                                                     | Supported | Supported; live-read proof                 |
+| ADA transaction build, fee calculation, submission, confirmation | Supported | Supported; confirmed Preview proof         |
+| Native-token build and submission core                           | Supported | Implemented; no committed live CNT receipt |
+| Address/credential history                                       | Supported | Not implemented                            |
+| Staking and Cardano protocol governance                          | Supported | Not implemented                            |
+| Pool and asset-metadata queries                                  | Supported | Not implemented                            |
+
+An unavailable Demeter operation throws `ProviderCapabilityError`; it never
+silently switches to IAGON. The complete claim/evidence matrix is maintained in
+the [POC compatibility audit](https://github.com/verbotenj/cardano-raw-sdk-demeter-poc/blob/main/docs/DEMETER_README_COMPATIBILITY.md).
+
+## ADA transfer
+
+`transferAda()` obtains the Fireblocks address, reads UTxOs through the selected
+provider, builds a Cardano body, requests RAW signing, verifies and assembles the
+witness, submits the signed CBOR through that same provider, and checks the
+returned transaction hash.
+
+```ts
+const result = await sdk.transferAda({
+  recipientAddress: "addr_test1...",
+  lovelaceAmount: 2_000_000,
 });
 
-console.log("Transaction Hash:", result.txHash);
+console.log(result.txHash);
 ```
 
-**Delegate Voting Power to a DRep**
+`2_000_000` lovelace equals 2 ADA. Validate the exact option shape against the
+generated API reference for the revision you pinned.
 
-```typescript
-const result = await sdk.delegateToDRep({
-  vaultAccountId: "your-vault-id",
-  index: 0,
-  drepId: "drep1...", // DRep credential or key hash
-});
+### Governed transfer
 
-console.log("Transaction Hash:", result.txHash);
-```
+For institutional workflows, the optional governance contract correlates:
 
-#### Pool Information
+1. locally decoded inputs, outputs, change, assets, fee, and recipient;
+2. the exact Cardano transaction-body hash sent to Fireblocks;
+3. Fireblocks `externalTxId`, approval groups, and designated signer evidence;
+4. the returned Ed25519 signature and source payment key;
+5. the transaction hash returned by Demeter; and
+6. the transaction confirmed by Cardano.
 
-```typescript
-// Get pool metadata (name, ticker, description)
-const metadata = await sdk.getPoolMetadata("pool1...");
-console.log("Pool Name:", metadata.data.name);
-console.log("Ticker:", metadata.data.ticker);
+The automated suite verifies these invariants and rejection cases. The public
+POC does **not** claim a live Fireblocks approval receipt because no Fireblocks
+credentials were used for its committed Preview transaction.
 
-// Get pool delegators summary
-const delegators = await sdk.getPoolDelegators("pool1...");
-console.log("Total Delegators:", delegators.data.total_count);
-console.log("Active Stake:", delegators.data.active_stake);
+## Error handling
 
-// Get detailed delegator list with pagination
-const delegatorList = await sdk.getPoolDelegatorsList("pool1...", 10, 0);
+SDK errors expose `statusCode`, `errorType`, `errorInfo`, and `service`.
 
-// Get blocks produced by pool
-const blocks = await sdk.getPoolBlocks("pool1...");
-console.log("Total Blocks:", blocks.data.length);
-```
-
-#### Vault Account Operations
-
-```typescript
-// Get vault account addresses
-const addresses = await sdk.getVaultAccountAddresses();
-
-// Get public key (change index, address index)
-const publicKey = await sdk.getPublicKey(0, 0);
-```
-
-#### Graceful Shutdown
-
-```typescript
-// Clean up resources when done
-await sdk.shutdown();
-```
-
-### Method 2: REST API Service
-
-Run the SDK as a REST API service using Docker or Node.js directly.
-
-#### Quick Start with Docker
-
-1. **Clone the repository**:
-
-   ```bash
-   git clone https://github.com/fireblocks/cardano-raw-sdk.git
-   cd cardano-raw-sdk
-   ```
-
-2. **Configure environment variables**:
-
-   ```bash
-   cp .env.example .env
-   # Edit .env with your credentials
-   ```
-
-3. **Start the service**:
-
-   ```bash
-   docker-compose up -d
-   ```
-
-4. **Access the API**:
-   - API Base URL: `http://localhost:8000/api`
-   - Swagger Documentation: `http://localhost:8000/api-docs`
-   - Health Check: `http://localhost:8000/health`
-
-#### API Endpoints
-
-##### Balance Operations
-
-```bash
-# Get balance by address
-GET /api/balance/address/:vaultAccountId?assetId=ADA&index=0&groupByPolicy=false
-
-# Get balance by credential
-GET /api/balance/credential/:vaultAccountId/:credential?groupByPolicy=false
-
-# Get balance by stake key
-GET /api/balance/stake-key/:vaultAccountId/:stakeKey?groupByPolicy=false
-```
-
-##### Webhook Operations
-
-**Setup in Fireblocks Console:**
-
-1. Go to **Fireblocks Console → Settings → Webhooks**
-2. Add webhook URL: `https://your-domain.com/api/webhook`
-3. Select events: `TRANSACTION_CREATED`, `TRANSACTION_STATUS_UPDATED`, etc.
-4. Fireblocks will automatically sign webhooks with both JWKS and legacy signatures
-
-**Important:** Ensure your server's `FIREBLOCKS_BASE_PATH` environment variable matches your Fireblocks workspace:
-
-- US workspace: `https://api.fireblocks.io` (default)
-- EU workspace: `https://api.eu1.fireblocks.io`
-- EU2 workspace: `https://api.eu2.fireblocks.io`
-- Sandbox: `https://sandbox-api.fireblocks.io`
-
-**Endpoint:**
-
-```bash
-# Enrich Fireblocks webhook with automatic signature verification
-POST /api/webhook
-Content-Type: application/json
-Headers:
-  - fireblocks-webhook-signature: <JWT signature> (added by Fireblocks)
-  - fireblocks-signature: <Legacy signature> (added by Fireblocks)
-
-Body:
-{
-  "eventType": "transaction.created",
-  "data": { ... }
-}
-
-# Response (enriched with CNT data):
-{
-  "eventType": "transaction.created",
-  "data": {
-    ...
-    "cardanoTokensData": {
-      "tx_hash": "...",
-      "inputs": [...],
-      "outputs": [...]
+```ts
+try {
+  await sdk.transferAda(options);
+} catch (error) {
+  if (error instanceof ProviderCapabilityError) {
+    console.error(`Provider ${error.provider} lacks ${error.capability}`);
+  } else if (error instanceof SdkApiError) {
+    if (error.errorType === "InsufficientBalance") {
+      console.error("The selected address does not have enough spendable ADA");
     }
+    console.error(error.statusCode, error.errorType);
+  } else {
+    throw error;
   }
 }
 ```
 
-**Security:** The endpoint automatically verifies webhook signatures using:
+## Optional REST server
 
-- **JWKS** (modern, automatic key rotation) - tries first
-- **Legacy RSA-SHA512** (static keys) - fallback
-- Verification environment is automatically determined from `FIREBLOCKS_BASE_PATH` config
+The package can also run a privileged operator API. Library users do not need
+this server. Its transfer routes can request signatures and spend assets, so it
+is secured and local-only by default.
 
-Invalid signatures are rejected with 401 error.
-
-##### Transaction Operations
+Create a private environment file:
 
 ```bash
-# Get transaction details by hash
-GET /api/tx/hash/:hash
-
-# Get asset information (metadata, decimals, supply)
-GET /api/assets/:policyId/:assetName
-
-# Get transaction history
-GET /api/tx/history/:vaultAccountId?index=0&limit=10&offset=0&fromSlot=100000
-
-# Get detailed transaction history
-GET /api/tx/address/:vaultAccountId?index=0&limit=10&offset=0
+cp .env.example .env.development
+openssl rand -hex 32
 ```
 
-##### Transfer Operations
-
-**ADA Transfers**
+Place the generated value in `SERVER_API_KEY`, configure Fireblocks and one
+chain provider, then build and start:
 
 ```bash
-# Transfer native ADA
-POST /api/transfers/ada
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "recipientAddress": "addr1qxy...",
-  "adaAmount": 5000000,
-  "index": 0
-}
-
-# Estimate ADA transfer fee
-POST /api/fee-estimate/ada
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "recipientAddress": "addr1qxy...",
-  "adaAmount": 5000000,
-  "index": 0
-}
+npm run build
+npm start
 ```
 
-**Single Token (CNT) Transfers**
+The default listener is `127.0.0.1:8000`. All `/api` routes except the signed
+Fireblocks webhook require either:
+
+```text
+Authorization: Bearer <SERVER_API_KEY>
+```
+
+or:
+
+```text
+x-api-key: <SERVER_API_KEY>
+```
+
+`GET /health` is the only unauthenticated health endpoint and returns only
+`Alive`. `POST /api/webhook` instead requires a valid Fireblocks JWKS or legacy
+signature, verified before processing. API documentation at `/api-docs`,
+`/api-docs-json`, and `/docs` also requires the server key.
+
+The server additionally applies security headers, request-size limits, request
+timeouts, and IP rate limiting. If you explicitly bind beyond loopback, put it
+behind authenticated TLS and a firewall. Set `TRUST_PROXY=true` only behind one
+trusted proxy that overwrites forwarded headers.
+
+### Docker
+
+The repository supplies a hardened multi-stage `Dockerfile`; it does not supply
+Docker Compose configuration.
 
 ```bash
-# Execute transfer (to address)
-POST /api/transfers
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "recipientAddress": "addr1qxy...",
-  "tokenPolicyId": "f0ff48bbb7bbe9d5...",
-  "tokenName": "4e49...",
-  "requiredTokenAmount": 1000000,
-  "index": 0
-}
-
-# Response:
-{
-  "txHash": "a1b2c3d4e5f6...",
-  "senderAddress": "addr1qxy...",
-  "tokenName": "4e49...",
-  "fee": {
-    "lovelace": "170000",
-    "ada": "0.170000"
-  }
-}
-
-# Execute transfer (vault-to-vault)
-POST /api/transfers
-Content-Type: application/json
-
-{
-  "vaultAccountId": "0",
-  "recipientVaultAccountId": "1",
-  "recipientIndex": 0,
-  "tokenPolicyId": "f0ff48bbb7bbe9d5...",
-  "tokenName": "4e49...",
-  "requiredTokenAmount": 1000000,
-  "index": 0
-}
+docker build -t cardano-raw-sdk .
+docker run --rm \
+  --env-file .env.development \
+  -p 127.0.0.1:8000:8000 \
+  -e SERVER_HOST=0.0.0.0 \
+  cardano-raw-sdk
 ```
 
-**Multi-Token Transfers**
-
-```bash
-# Transfer multiple tokens in one transaction
-POST /api/transfers/tokens
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "recipientAddress": "addr1qxy...",
-  "tokens": [
-    {
-      "policyId": "f0ff48bbb7bbe9d5...",
-      "assetName": "4e4654",
-      "amount": 1000000
-    },
-    {
-      "policyId": "a1b2c3d4e5f6...",
-      "assetName": "544f4b454e",
-      "amount": 500000
-    }
-  ],
-  "includeAda": true,
-  "adaAmount": 2000000,
-  "index": 0
-}
-
-# Estimate multi-token transfer fee
-POST /api/fee-estimate/tokens
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "recipientAddress": "addr1qxy...",
-  "tokens": [
-    { "policyId": "f0ff48bbb...", "assetName": "4e4654", "amount": 1000000 }
-  ],
-  "index": 0
-}
-```
-
-**UTxO Consolidation**
-
-```bash
-# Consolidate fragmented UTxOs
-POST /api/utxos/consolidate
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "index": 0,
-  "targetAddress": "addr1qxy..." // Optional
-}
-
-# Response:
-{
-  "txHash": "a1b2c3d4e5f6...",
-  "inputCount": 15,
-  "fee": {
-    "lovelace": "200000",
-    "ada": "0.200000"
-  }
-}
-```
-
-##### Governance Operations
-
-```bash
-# Register as a DRep (requires 500 ADA deposit)
-POST /api/governance/register-drep
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "index": 0,
-  "anchor": {
-    "url": "https://example.com/drep-metadata.json",
-    "dataHash": "abc123..."
-  }
-}
-
-# Cast a governance vote (as a DRep)
-POST /api/governance/vote
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "index": 0,
-  "governanceActionTxHash": "abc123...",
-  "governanceActionIndex": 0,
-  "vote": "yes"
-}
-
-# Delegate voting power to a DRep
-POST /api/governance/delegate-drep
-Content-Type: application/json
-
-{
-  "vaultAccountId": "your-vault-id",
-  "index": 0,
-  "drepId": "drep1..."
-}
-```
-
-##### Pool Information
-
-```bash
-# Get pool metadata (name, ticker, description)
-GET /api/pools/:poolId/metadata
-
-# Get pool delegators summary
-GET /api/pools/:poolId/delegators?limit=10&offset=0
-
-# Get detailed delegator list
-GET /api/pools/:poolId/delegators/list?limit=10&offset=0
-
-# Get blocks produced by pool
-GET /api/pools/:poolId/blocks
-```
-
-##### Example cURL Commands
-
-```bash
-# Get balance
-curl http://localhost:8000/api/balance/address/vault-123?assetId=ADA&index=0
-
-# Get transaction history
-curl http://localhost:8000/api/tx/history/vault-123?limit=5
-
-# Get asset information
-curl http://localhost:8000/api/assets/f0ff48bbb7bbe9d5.../4e4654
-
-# Transfer native ADA
-curl -X POST http://localhost:8000/api/transfers/ada \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "recipientAddress": "addr1qxy...",
-    "adaAmount": 5000000,
-    "index": 0
-  }'
-
-# Estimate ADA transfer fee
-curl -X POST http://localhost:8000/api/fee-estimate/ada \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "recipientAddress": "addr1qxy...",
-    "adaAmount": 5000000,
-    "index": 0
-  }'
-
-# Execute CNT transfer (to address)
-curl -X POST http://localhost:8000/api/transfers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "recipientAddress": "addr1qxy...",
-    "tokenPolicyId": "f0ff48bbb...",
-    "tokenName": "4e49...",
-    "requiredTokenAmount": 1000000
-  }'
-# Response: {"txHash":"a1b2c3d4...","senderAddress":"addr1qxy...","tokenName":"4e49...","fee":{"lovelace":"170000","ada":"0.170000"}}
-
-# Execute CNT transfer (vault-to-vault)
-curl -X POST http://localhost:8000/api/transfers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "0",
-    "recipientVaultAccountId": "1",
-    "tokenPolicyId": "f0ff48bbb...",
-    "tokenName": "4e49...",
-    "requiredTokenAmount": 1000000
-  }'
-
-# Transfer multiple tokens
-curl -X POST http://localhost:8000/api/transfers/tokens \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "recipientAddress": "addr1qxy...",
-    "tokens": [
-      {"policyId": "f0ff48bbb...", "assetName": "4e4654", "amount": 1000000},
-      {"policyId": "a1b2c3d4e5f6...", "assetName": "544f4b454e", "amount": 500000}
-    ],
-    "includeAda": true,
-    "adaAmount": 2000000
-  }'
-
-# Consolidate UTxOs
-curl -X POST http://localhost:8000/api/utxos/consolidate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "index": 0
-  }'
-
-# Register as DRep
-curl -X POST http://localhost:8000/api/governance/register-drep \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "index": 0,
-    "anchor": {
-      "url": "https://example.com/drep-metadata.json",
-      "dataHash": "abc123..."
-    }
-  }'
-
-# Cast governance vote
-curl -X POST http://localhost:8000/api/governance/vote \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "index": 0,
-    "governanceActionTxHash": "abc123...",
-    "governanceActionIndex": 0,
-    "vote": "yes"
-  }'
-
-# Delegate to DRep
-curl -X POST http://localhost:8000/api/governance/delegate-drep \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vaultAccountId": "vault-123",
-    "index": 0,
-    "drepId": "drep1..."
-  }'
-
-# Get pool metadata
-curl http://localhost:8000/api/pools/pool1.../metadata
-
-# Get pool delegators
-curl http://localhost:8000/api/pools/pool1.../delegators?limit=10
-
-# Get pool blocks
-curl http://localhost:8000/api/pools/pool1.../blocks
-```
+Binding the container process to `0.0.0.0` is necessary for the host mapping;
+the host-side mapping above remains loopback-only.
 
 ## Configuration
 
-### Environment Variables
+| Variable                                    | Required               | Purpose                                                         |
+| ------------------------------------------- | ---------------------- | --------------------------------------------------------------- |
+| `FIREBLOCKS_API_USER_KEY`                   | Server/Fireblocks mode | Fireblocks API user ID                                          |
+| `FIREBLOCKS_API_USER_SECRET_KEY` or `_PATH` | Server/Fireblocks mode | PEM content or private file path                                |
+| `FIREBLOCKS_BASE_PATH`                      | No                     | Fireblocks API region; defaults to US                           |
+| `FIREBLOCKS_VAULT_ACCOUNT_ID`               | Application-specific   | Source vault account                                            |
+| `CARDANO_NETWORK`                           | No                     | `mainnet`, `preprod`, or `preview`; server default is `mainnet` |
+| `CHAIN_PROVIDER`                            | Server                 | `iagon` or `demeter`; server default is `demeter`               |
+| `IAGON_API_KEY`                             | IAGON                  | IAGON bearer credential                                         |
+| `DEMETER_BLOCKFROST_URL`                    | Demeter                | Exact resource base URL                                         |
+| `DEMETER_API_KEY`                           | Demeter                | Resource credential                                             |
+| `SERVER_API_KEY`                            | REST server            | At least 32 random bytes                                        |
+| `SERVER_HOST`                               | No                     | Listener address; defaults to `127.0.0.1`                       |
+| `REQUEST_BODY_LIMIT`                        | No                     | Express request limit; defaults to `256kb`                      |
+| `RATE_LIMIT_WINDOW_MS`                      | No                     | Rate-limit window; defaults to 60 seconds                       |
+| `RATE_LIMIT_MAX`                            | No                     | Requests per IP/window; defaults to 100                         |
+| `TRUST_PROXY`                               | No                     | Trust exactly one proxy only when set to `true`                 |
+| `NODE_ENV`                                  | No                     | Defaults to `production` behavior                               |
 
-Copy `.env.example` to `.env` and fill in your values:
+Keep secrets in an ignored local file or a secret manager. Never commit `.env`
+files, mnemonics, PEM material, API keys, full signed CBOR, or unredacted
+Fireblocks responses.
 
-```bash
-cp .env.example .env
-```
+## Network safety
 
-| Variable                              | Required | Default                     | Description                                                    |
-| ------------------------------------- | -------- | --------------------------- | -------------------------------------------------------------- |
-| `PORT`                                | No       | `8000`                      | HTTP server port                                               |
-| `NODE_ENV`                            | No       | `production`                | Set to `development` only when using self-signed certs locally |
-| `FIREBLOCKS_API_USER_KEY`             | Yes      | -                           | Fireblocks API key UUID                                        |
-| `FIREBLOCKS_API_USER_SECRET_KEY_PATH` | Yes      | -                           | Absolute path to the Fireblocks RSA secret key file            |
-| `FIREBLOCKS_BASE_PATH`                | No       | `https://api.fireblocks.io` | Fireblocks workspace URL - also controls webhook JWKS region   |
-| `IAGON_API_KEY`                       | Yes      | -                           | Iagon API key for blockchain data queries                      |
-| `CARDANO_NETWORK`                     | No       | `mainnet`                   | `mainnet` or `preprod`                                         |
+| Network | SDK enum           | Fireblocks asset | Network magic |
+| ------- | ------------------ | ---------------- | ------------- |
+| Mainnet | `Networks.MAINNET` | `ADA`            | `764824073`   |
+| Preprod | `Networks.PREPROD` | `ADA_TEST`       | `1`           |
+| Preview | `Networks.PREVIEW` | `ADA_TEST`       | `2`           |
 
-**Fireblocks base path options:**
+The live GitHub workflows default to Preview, use per-network GitHub
+environments, and require the exact phrase
+`I_UNDERSTAND_THIS_USES_REAL_FUNDS` before mainnet. Protect the
+`cardano-mainnet` environment with required reviewers before adding secrets.
 
-- US (default): `https://api.fireblocks.io`
+## Security
 
-### Fireblocks Secret Key
+- Treat Fireblocks RAW signing as arbitrary-message signing. Constrain API
+  users, vaults, assets, derivation paths, destinations, amounts, and approval
+  groups with Fireblocks policy.
+- Use distinct credentials and vaults for Preview, Preprod, and Mainnet.
+- Do not accept a caller-supplied provider URL in a request; provider endpoints
+  are trusted startup configuration.
+- TLS certificate verification is mandatory for IAGON requests, including in
+  development. The legacy `disableSslVerification` option now throws if enabled.
+- Review the decoded transaction before signing. A provider supplies untrusted
+  chain data and must never decide the business intent.
+- Correlate `externalTxId`, Fireblocks transaction ID, transaction-body hash,
+  signer evidence, submitted hash, and confirmed hash for governed transfers.
+- Rotate provider and server credentials, use least privilege, and retain
+  sanitized audit logs.
+- Run `npm run quality` and review dependency alerts before merging.
 
-The SDK supports three ways to provide your Fireblocks RSA private key:
+See [SECURITY.md](SECURITY.md) for disclosure and deployment rules.
 
-#### Option 1: File Path (Recommended for local development)
-
-```bash
-# Create a secure directory
-mkdir -p ~/.fireblocks
-
-# Save your secret key
-cat > ~/.fireblocks/secret.key << 'EOF'
------BEGIN PRIVATE KEY-----
-MIIJQgIBADANBgkqhki...
------END PRIVATE KEY-----
-EOF
-
-# Set proper permissions
-chmod 600 ~/.fireblocks/secret.key
-
-# Set environment variable
-export FIREBLOCKS_API_USER_SECRET_KEY_PATH=/home/user/.fireblocks/secret.key
-```
-
-#### Option 2: Direct PEM Content (CI/CD environments)
-
-```bash
-# Set the key content directly (with newlines)
-export FIREBLOCKS_API_USER_SECRET_KEY="-----BEGIN PRIVATE KEY-----
-MIIJQgIBADANBgkqhki...
------END PRIVATE KEY-----"
-```
-
-#### Option 3: Base64 Encoded (Recommended for CI/CD secrets)
-
-```bash
-# Encode your key file to base64 (single line, easy to store as secret)
-cat ~/.fireblocks/secret.key | base64 -w 0 > key.b64
-
-# Set the base64-encoded content
-export FIREBLOCKS_API_USER_SECRET_KEY=$(cat key.b64)
-```
-
-**Priority:** If both `FIREBLOCKS_API_USER_SECRET_KEY` and `FIREBLOCKS_API_USER_SECRET_KEY_PATH` are set, the direct key content takes precedence.
-
-## API Documentation
-
-### Swagger UI
-
-When running the API service, interactive API documentation is available at:
-
-```
-http://localhost:8000/api-docs
-```
-
-### TypeDoc Documentation
-
-Generate TypeScript documentation:
+## Verification
 
 ```bash
-npm run docs
-```
-
-View the generated documentation by opening `docs/index.html` in your browser.
-
-## Examples
-
-### Example 1: Transfer Tokens with SDK
-
-```typescript
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks, SupportedAssets } from "cardano-raw-sdk/types";
-import { BasePath } from "@fireblocks/ts-sdk";
-
-async function transferTokens() {
-  const sdk = await FireblocksCardanoRawSDK.createInstance({
-    fireblocksConfig: {
-      apiKey: process.env.FIREBLOCKS_API_KEY!,
-      secretKey: process.env.FIREBLOCKS_SECRET_KEY!,
-      basePath: BasePath.US,
-    },
-    vaultAccountId: "vault-123",
-    network: Networks.MAINNET,
-    iagonApiKey: process.env.IAGON_API_KEY!,
-  });
-
-  try {
-    const result = await sdk.transfer({
-      recipientAddress: "addr1qxy...",
-      tokenPolicyId: "f0ff48bbb7bbe9d5...",
-      tokenName: "4e49...",
-      requiredTokenAmount: 1000000,
-    });
-
-    console.log("Transfer successful!");
-    console.log("Transaction Hash:", result.txHash);
-    console.log("Sender Address:", result.senderAddress);
-    console.log("Transaction Fee:", result.fee.ada, "ADA");
-    console.log("View on Cardanoscan:", `https://cardanoscan.io/transaction/${result.txHash}`);
-  } catch (error) {
-    console.error("Transfer failed:", error);
-  } finally {
-    await sdk.shutdown();
-  }
-}
-
-transferTokens();
-```
-
-### Example 2: SDK Manager with Connection Pooling
-
-```typescript
-import { SdkManager } from "cardano-raw-sdk/pool";
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks } from "cardano-raw-sdk/types";
-import { BasePath } from "@fireblocks/ts-sdk";
-
-const manager = new SdkManager(
-  {
-    apiKey: process.env.FIREBLOCKS_API_KEY!,
-    secretKey: process.env.FIREBLOCKS_SECRET_KEY!,
-    basePath: BasePath.US,
-  },
-  Networks.MAINNET,
-  {
-    maxPoolSize: 50,
-    idleTimeoutMs: 20 * 60 * 1000,
-  },
-  async (vaultAccountId, fireblocksConfig, network) =>
-    FireblocksCardanoRawSDK.createInstance({
-      fireblocksConfig,
-      vaultAccountId,
-      network,
-    })
-);
-
-// Get SDK for a vault account (automatically pooled)
-const sdk1 = await manager.getSdk("vault-123");
-const balance1 = await sdk1.getBalanceByAddress({ index: 0 });
-
-// Reuses the same SDK instance
-const sdk2 = await manager.getSdk("vault-123");
-const balance2 = await sdk2.getBalanceByAddress({ index: 0 });
-
-// Release SDK back to pool when done
-manager.releaseSdk("vault-123");
-
-// Get pool metrics
-const metrics = manager.getMetrics();
-console.log("Pool Metrics:", metrics);
-
-// Shutdown when done
-await manager.shutdown();
-```
-
-### Example 3: API Client in JavaScript
-
-```javascript
-const axios = require("axios");
-
-const API_BASE_URL = "http://localhost:8000/api";
-
-async function getBalanceAndTransfer() {
-  try {
-    // Get balance
-    const balanceResponse = await axios.get(`${API_BASE_URL}/balance/address/vault-123`, {
-      params: {
-        assetId: "ADA",
-        index: 0,
-        groupByPolicy: true,
-      },
-    });
-    console.log("Balance:", balanceResponse.data);
-
-    // Execute transfer
-    const transferResponse = await axios.post(`${API_BASE_URL}/transfers`, {
-      vaultAccountId: "vault-123",
-      recipientAddress: "addr1qxy...",
-      tokenPolicyId: "f0ff48bbb7bbe9d5...",
-      tokenName: "4e49...",
-      requiredTokenAmount: 1000000,
-    });
-    console.log("Transfer Result:", transferResponse.data);
-    console.log("Transaction Hash:", transferResponse.data.txHash);
-    console.log("Fee:", transferResponse.data.fee.ada, "ADA");
-  } catch (error) {
-    console.error("Error:", error.response?.data || error.message);
-  }
-}
-
-getBalanceAndTransfer();
-```
-
-### Example 4: Using Cache for Performance
-
-```typescript
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks, SupportedAssets } from "cardano-raw-sdk/types";
-import { BasePath } from "@fireblocks/ts-sdk";
-
-async function demonstrateCaching() {
-  const sdk = await FireblocksCardanoRawSDK.createInstance({
-    fireblocksConfig: {
-      apiKey: process.env.FIREBLOCKS_API_KEY!,
-      secretKey: process.env.FIREBLOCKS_SECRET_KEY!,
-      basePath: BasePath.US,
-    },
-    vaultAccountId: "vault-123",
-    network: Networks.MAINNET,
-    iagonApiKey: process.env.IAGON_API_KEY!,
-  });
-
-  // Check cache statistics
-  const stats = sdk.getCacheStats();
-  console.log(`Cache stats: ${stats.addressCount} addresses, ${stats.publicKeyCount} public keys`);
-
-  // Multiple operations benefit from caching
-  const balance1 = await sdk.getBalanceByAddress({ index: 0 });
-  const balance2 = await sdk.getBalanceByAddress({ index: 0 });
-  // Second balance check uses cached address - no Fireblocks API call!
-
-  // Clear cache if needed
-  sdk.clearCache();
-
-  await sdk.shutdown();
-}
-
-demonstrateCaching();
-```
-
-### Example 5: Transfer Native ADA
-
-```typescript
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks } from "cardano-raw-sdk/types";
-import { BasePath } from "@fireblocks/ts-sdk";
-
-async function transferAda() {
-  const sdk = await FireblocksCardanoRawSDK.createInstance({
-    fireblocksConfig: {
-      apiKey: process.env.FIREBLOCKS_API_KEY!,
-      secretKey: process.env.FIREBLOCKS_SECRET_KEY!,
-      basePath: BasePath.US,
-    },
-    vaultAccountId: "vault-123",
-    network: Networks.MAINNET,
-    iagonApiKey: process.env.IAGON_API_KEY!,
-  });
-
-  try {
-    // Estimate fee first
-    const feeEstimate = await sdk.estimateAdaTransactionFee({
-      index: 0,
-      recipientAddress: "addr1qxy...",
-      adaAmount: 5000000, // 5 ADA
-    });
-    console.log("Estimated Fee:", feeEstimate.fee.ada, "ADA");
-
-    // Execute transfer
-    const result = await sdk.transferAda({
-      index: 0,
-      recipientAddress: "addr1qxy...",
-      adaAmount: 5000000,
-    });
-
-    console.log("ADA Transfer successful!");
-    console.log("Transaction Hash:", result.txHash);
-    console.log("Actual Fee:", result.fee.ada, "ADA");
-  } catch (error) {
-    console.error("Transfer failed:", error);
-  } finally {
-    await sdk.shutdown();
-  }
-}
-
-transferAda();
-```
-
-### Example 6: Multi-Token Transfer
-
-```typescript
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks } from "cardano-raw-sdk/types";
-import { BasePath } from "@fireblocks/ts-sdk";
-
-async function transferMultipleTokens() {
-  const sdk = await FireblocksCardanoRawSDK.createInstance({
-    fireblocksConfig: {
-      apiKey: process.env.FIREBLOCKS_API_KEY!,
-      secretKey: process.env.FIREBLOCKS_SECRET_KEY!,
-      basePath: BasePath.US,
-    },
-    vaultAccountId: "vault-123",
-    network: Networks.MAINNET,
-    iagonApiKey: process.env.IAGON_API_KEY!,
-  });
-
-  try {
-    const result = await sdk.transferMultipleTokens({
-      index: 0,
-      recipientAddress: "addr1qxy...",
-      tokens: [
-        {
-          policyId: "f0ff48bbb7bbe9d5...",
-          assetName: "4e4654",
-          amount: 1000000,
-        },
-        {
-          policyId: "a1b2c3d4e5f6...",
-          assetName: "544f4b454e",
-          amount: 500000,
-        },
-      ],
-      includeAda: true,
-      adaAmount: 2000000, // Also send 2 ADA
-    });
-
-    console.log("Multi-token transfer successful!");
-    console.log("Transaction Hash:", result.txHash);
-    console.log("Fee:", result.fee.ada, "ADA");
-  } catch (error) {
-    console.error("Transfer failed:", error);
-  } finally {
-    await sdk.shutdown();
-  }
-}
-
-transferMultipleTokens();
-```
-
-### Example 7: UTxO Consolidation
-
-```typescript
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks } from "cardano-raw-sdk/types";
-import { BasePath } from "@fireblocks/ts-sdk";
-
-async function consolidateUtxos() {
-  const sdk = await FireblocksCardanoRawSDK.createInstance({
-    fireblocksConfig: {
-      apiKey: process.env.FIREBLOCKS_API_KEY!,
-      secretKey: process.env.FIREBLOCKS_SECRET_KEY!,
-      basePath: BasePath.US,
-    },
-    vaultAccountId: "vault-123",
-    network: Networks.MAINNET,
-    iagonApiKey: process.env.IAGON_API_KEY!,
-  });
-
-  try {
-    const result = await sdk.consolidateUtxos({
-      index: 0,
-      // targetAddress: "addr1qxy..." // Optional: defaults to source address
-    });
-
-    console.log("UTxO consolidation successful!");
-    console.log("Transaction Hash:", result.txHash);
-    console.log("Consolidated", result.inputCount, "UTxOs");
-    console.log("Fee:", result.fee.ada, "ADA");
-  } catch (error) {
-    console.error("Consolidation failed:", error);
-  } finally {
-    await sdk.shutdown();
-  }
-}
-
-consolidateUtxos();
-```
-
-### Example 8: Governance Operations
-
-```typescript
-import { FireblocksCardanoRawSDK } from "cardano-raw-sdk";
-import { Networks } from "cardano-raw-sdk/types";
-import { BasePath } from "@fireblocks/ts-sdk";
-
-async function participateInGovernance() {
-  const sdk = await FireblocksCardanoRawSDK.createInstance({
-    fireblocksConfig: {
-      apiKey: process.env.FIREBLOCKS_API_KEY!,
-      secretKey: process.env.FIREBLOCKS_SECRET_KEY!,
-      basePath: BasePath.US,
-    },
-    vaultAccountId: "vault-123",
-    network: Networks.MAINNET,
-    iagonApiKey: process.env.IAGON_API_KEY!,
-  });
-
-  try {
-    // Register as a DRep (requires 500 ADA deposit)
-    const drepResult = await sdk.registerAsDRep({
-      vaultAccountId: "vault-123",
-      index: 0,
-      anchor: {
-        url: "https://example.com/drep-metadata.json",
-        dataHash: "abc123...",
-      },
-    });
-    console.log("Registered as DRep:", drepResult.drepId);
-    console.log("Transaction Hash:", drepResult.txHash);
-
-    // Cast a vote on a governance action
-    const voteResult = await sdk.castGovernanceVote({
-      vaultAccountId: "vault-123",
-      index: 0,
-      governanceActionTxHash: "abc123...",
-      governanceActionIndex: 0,
-      vote: "yes", // or "no" or "abstain"
-    });
-    console.log("Vote cast! TX Hash:", voteResult.txHash);
-
-    // Delegate voting power to another DRep
-    const delegateResult = await sdk.delegateToDRep({
-      vaultAccountId: "vault-123",
-      index: 0,
-      drepId: "drep1...",
-    });
-    console.log("Delegated to DRep! TX Hash:", delegateResult.txHash);
-  } catch (error) {
-    console.error("Governance operation failed:", error);
-  } finally {
-    await sdk.shutdown();
-  }
-}
-
-participateInGovernance();
-```
-
-## Development
-
-### Setup Development Environment
-
-```bash
-# Install dependencies
-npm install
-
-# Build the project
+npm run format:check
+npm run lint
+npm run typecheck
+npm test -- --runInBand
 npm run build
-
-# Run in development mode with hot reload
-npm run dev
-
-# Generate documentation
+npm run audit:prod
 npm run docs
 ```
 
-### Project Structure
+`npm run quality` runs every gate, regenerates `dist/` and the API reference,
+and fails if either committed artifact is stale. CI repeats the same
+non-destructive checks; it never receives wallet or provider secrets.
+Live workflows are separate, manually dispatched, and environment-scoped.
 
-```
-cardano-raw-sdk/
-├── src/
-│   ├── FireblocksCardanoRawSDK.ts       # Main SDK class
-│   ├── pool/
-│   │   └── sdkManager.ts         # Connection pooling manager
-│   ├── services/
-│   │   ├── fireblocks.service.ts # Fireblocks integration
-│   │   └── iagon.api.service.ts  # Iagon API client
-│   ├── api/
-│   │   ├── router.ts             # Express routes
-│   │   └── controllers/
-│   │       └── controller.ts     # API controllers
-│   ├── types/                    # TypeScript type definitions
-│   ├── utils/                    # Utility functions
-│   └── server.ts                 # Express server setup
-├── docs/                         # Generated documentation
-├── Dockerfile                    # Docker configuration
-├── docker-compose.yml            # Docker Compose setup
-├── package.json
-├── tsconfig.json
-└── README.md
-```
+The companion [Demeter POC](https://github.com/verbotenj/cardano-raw-sdk-demeter-poc)
+contains beginner instructions, sanitized logs, a confirmed Preview receipt,
+tamper tests, and a read-only command that rechecks the receipt through Demeter.
 
-### Docker Deployment
+## Evidence boundaries
 
-#### Build Docker Image
-
-```bash
-docker build -t cardano-raw-sdk:latest .
-```
-
-#### Run with Docker Compose
-
-```bash
-# Start services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
-
-# Restart services
-docker-compose restart
-```
-
-#### Docker Compose Configuration
-
-```yaml
-version: "3.8"
-
-services:
-  fireblocks-sdk:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - PORT=8000
-      - CARDANO_NETWORK=mainnet
-      - POOL_MAX_SIZE=100
-    env_file:
-      - .env
-    volumes:
-      - ./fireblocks_secret.key:/app/fireblocks_secret.key:ro
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-```
-
-## Advanced Features
-
-### Intelligent Caching
-
-The SDK implements automatic caching to minimize Fireblocks API calls:
-
-- **Address Caching**: Vault account addresses are cached by index
-- **Public Key Caching**: Public keys are cached per asset/change/address combination
-- **Automatic Cache Management**: Caches are cleared on SDK shutdown
-- **Manual Cache Control**: Use `clearCache()` and `getCacheStats()` methods
-
-```typescript
-// Check cache statistics
-const stats = sdk.getCacheStats();
-console.log("Cached addresses:", stats.addressCount);
-console.log("Cached public keys:", stats.publicKeyCount);
-
-// Clear cache manually if needed
-sdk.clearCache();
-```
-
-**Benefits:**
-
-- Reduces API calls to Fireblocks by up to 90%
-- Faster response times for repeated operations
-- Lower costs and improved rate limit compliance
-- Automatic per-vault-account isolation via SDK pooling
-
-### Connection Pooling
-
-The SDK Manager implements intelligent connection pooling:
-
-- **LRU Eviction**: Automatically removes least-recently-used idle connections
-- **Automatic Cleanup**: Periodically removes idle connections
-- **Per-Vault Instances**: Each vault account gets its own SDK instance
-- **Metrics**: Track pool usage and performance
-
-### Error Handling
-
-```typescript
-try {
-  const result = await sdk.transfer({ ... });
-} catch (error) {
-  if (error.code === 'INSUFFICIENT_BALANCE') {
-    console.error('Insufficient balance:', error.details);
-  } else if (error instanceof SdkApiError) {
-    console.error('API Error:', error.statusCode, error.message);
-  } else {
-    console.error('Unexpected error:', error);
-  }
-}
-```
-
-### Network Support
-
-- **Mainnet**: Production Cardano network (use `Networks.MAINNET`)
-- **Preprod**: Pre-production testnet (use `Networks.PREPROD`)
-- **Preview**: Preview testnet (not currently supported)
-
-### Advanced SDK Methods
-
-The SDK provides additional methods for advanced use cases:
-
-```typescript
-// Access internal services for advanced operations
-const fireblocksService = sdk.getFireblocksService();
-const iagonApiService = sdk.getIagonApiService();
-
-// Cache management
-sdk.clearCache(); // Clear all cached addresses and public keys
-const stats = sdk.getCacheStats(); // Get cache statistics
-
-// Graceful shutdown
-await sdk.shutdown(); // Clean up resources and clear cache
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"SDK factory not initialized" error**
-   - Ensure you're passing the SDK factory function to SdkManager constructor
-   - Check that FireblocksCardanoRawSDK.createInstance is properly imported
-
-2. **"Insufficient balance" error**
-   - Ensure sufficient ADA for transaction fees (minimum ~1.2 ADA)
-   - Verify token balance is sufficient for the transfer amount
-
-3. **Docker container fails to start**
-   - Check that the secret key path is correct and file is readable
-   - Verify all required environment variables are set
-   - Check Docker logs: `docker-compose logs -f`
-
-## Security Considerations
-
-- ⚠️ Never commit `.env` files or secret keys to version control
-- ⚠️ Store Fireblocks secret keys in secure locations with restricted permissions
-- ⚠️ Enable Fireblocks transaction approval policies for production
+Cardano proves that transaction bytes were accepted and included in a block. It
+does not record the SDK name or gateway that submitted them. SDK and Demeter
+provenance therefore comes from the pinned dependency, source path, sanitized
+execution log, returned hash, and reproducible provider lookup. Stronger
+provider attribution requires correlated Demeter control-plane request records.
 
 ## License
 
-[MIT License](LICENSE)
+The upstream repository and this fork currently contain no license grant.
+`package.json` is therefore marked `UNLICENSED`. Public visibility is not a
+license to use, modify, or redistribute the code. Obtain permission from the
+rights holder before using it beyond evaluation, or add an approved license in
+a separately reviewed legal change.

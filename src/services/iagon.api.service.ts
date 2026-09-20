@@ -1,8 +1,11 @@
 import axios from "axios";
-import https from "https";
 import { z } from "zod";
-import { Logger, ErrorHandler, decodeAssetName } from "../utils/index.js";
+import { ErrorHandler } from "../utils/errorHandler.js";
+import { decodeAssetName } from "../utils/general.js";
+import { Logger } from "../utils/logger.js";
 import { iagonBaseUrl } from "../constants.js";
+import { IagonQueries } from "./iagon.queries.js";
+import type { ChainQueries } from "../types/chain-queries.js";
 
 // Zod schemas for critical Iagon responses
 const utxoDataSchema = z.object({
@@ -69,6 +72,8 @@ import {
   PaymentAddressesResponse,
   HealthStatusResponse,
   AssetInfoResponse,
+  CardanoDataProvider,
+  ChainProviderCapability,
 } from "../types/index.js";
 
 /**
@@ -79,7 +84,10 @@ interface CachedAssetInfo {
   timestamp: number;
 }
 
-export class IagonApiService {
+export class IagonApiService implements CardanoDataProvider {
+  public readonly queries: ChainQueries = new IagonQueries(this);
+  public readonly kind = "iagon" as const;
+  public readonly capabilities = new Set(Object.values(ChainProviderCapability));
   private readonly logger = new Logger("services:iagon-api-service");
   private network: Networks;
   private readonly iagonBaseUrl = iagonBaseUrl;
@@ -105,21 +113,9 @@ export class IagonApiService {
       );
     }
 
-    // SECURITY: Prevent SSL verification disabling in production
+    // Never disable TLS verification for the provider that supplies signing inputs.
     if (disableSslVerification) {
-      const env = process.env.NODE_ENV || "production";
-
-      if (env === "production") {
-        throw new Error(
-          "SSL verification cannot be disabled in production environment. " +
-            "This is a critical security vulnerability that enables man-in-the-middle attacks."
-        );
-      }
-
-      this.logger.warn(
-        "⚠️  SSL VERIFICATION DISABLED - This should ONLY be used in development with self-signed certificates. " +
-          "NEVER deploy to production with this setting."
-      );
+      throw new Error("SSL verification cannot be disabled for IAGON requests");
     }
 
     this.iagonApiKey = apiKey;
@@ -133,9 +129,6 @@ export class IagonApiService {
         Authorization: `Bearer ${this.iagonApiKey}`,
         "Content-Type": "application/json",
       },
-      ...(disableSslVerification && {
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      }),
     });
   }
 
@@ -187,10 +180,8 @@ export class IagonApiService {
           timestamp: new Date().toISOString(),
         },
       };
-    } catch (error: unknown) {
-      this.logger.error(
-        `Iagon health check error: ${error instanceof Error ? error.message : String(error)}`
-      );
+    } catch {
+      this.logger.error("Iagon health check failed");
       return {
         success: false,
         data: {
@@ -458,6 +449,11 @@ export class IagonApiService {
     } catch (error: unknown) {
       throw this.errorHandler.handleApiError(error, `fetching current epoch`);
     }
+  };
+
+  public getCurrentSlot = async (): Promise<number> => {
+    const response = await this.getCurrentEpoch();
+    return response.data.tip.slot;
   };
 
   /**

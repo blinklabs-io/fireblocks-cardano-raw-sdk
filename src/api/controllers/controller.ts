@@ -79,6 +79,16 @@ export class ApiController {
     }
   };
 
+  public getProviderHealth = async (_req: Request, res: Response) => {
+    try {
+      const result = await this.sdkManager.withSdk("0", (sdk) => sdk.checkProviderHealth());
+      this.logger.info("Chain provider health check completed");
+      ok(res, result);
+    } catch (error: unknown) {
+      this.handleError(error, res, "getProviderHealth");
+    }
+  };
+
   public getBalanceByAddress = async (req: Request, res: Response) => {
     const { vaultAccountId } = req.params as { vaultAccountId: string };
     const { index } = req.query as unknown as AddressQuery;
@@ -191,7 +201,7 @@ export class ApiController {
       const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) =>
         sdk.getUtxosByAddress(index)
       );
-      this.logger.info(`UTXOs retrieved successfully for vault ${vaultAccountId}`);
+      this.logger.info("UTXOs retrieved successfully for configured vault");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "getUtxosByAddress");
@@ -204,7 +214,7 @@ export class ApiController {
       const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) =>
         sdk.getUtxosByVaultAccountId()
       );
-      this.logger.info(`Vault UTxOs retrieved for vault ${vaultAccountId}`);
+      this.logger.info("Vault UTxOs retrieved successfully");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "getVaultUtxos");
@@ -253,9 +263,7 @@ export class ApiController {
       const result = await this.sdkManager.withSdk(vaultAccountId, (sdk) =>
         sdk.getAllTransactionHistory(options)
       );
-      this.logger.info(
-        `All transactions history retrieved successfully for vault ${vaultAccountId}`
-      );
+      this.logger.info("All transactions history retrieved successfully for configured vault");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "getAllTransactionHistory");
@@ -277,7 +285,7 @@ export class ApiController {
         sdk.getAllDetailedTxHistory(options)
       );
       this.logger.info(
-        `All detailed transactions history retrieved successfully for vault ${vaultAccountId}`
+        "All detailed transactions history retrieved successfully for configured vault"
       );
       ok(res, result);
     } catch (error: unknown) {
@@ -393,8 +401,7 @@ export class ApiController {
       // Extract headers for signature verification
       const headers: Record<string, string | undefined> = {
         "fireblocks-webhook-signature": req.headers["fireblocks-webhook-signature"] as
-          | string
-          | undefined,
+          string | undefined,
         "fireblocks-signature": req.headers["fireblocks-signature"] as string | undefined,
       };
 
@@ -454,7 +461,7 @@ export class ApiController {
         sdk.registerStakingCredential({ vaultAccountId, index, depositAmount, fee })
       );
 
-      this.logger.info(`Staking registration successful for vault ${vaultAccountId}`);
+      this.logger.info("Staking registration successful");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "registerStaking");
@@ -481,7 +488,7 @@ export class ApiController {
         sdk.deregisterStakingCredential({ vaultAccountId, fee })
       );
 
-      this.logger.info(`Staking deregistration successful for vault ${vaultAccountId}`);
+      this.logger.info("Staking deregistration successful");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "deregisterStaking");
@@ -516,7 +523,7 @@ export class ApiController {
         sdk.delegateToPool({ vaultAccountId, poolId, fee })
       );
 
-      this.logger.info(`Pool delegation successful for vault ${vaultAccountId} to pool ${poolId}`);
+      this.logger.info("Pool delegation successful");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "delegateToPool");
@@ -544,7 +551,7 @@ export class ApiController {
         sdk.withdrawRewards({ vaultAccountId, limit, fee })
       );
 
-      this.logger.info(`Reward withdrawal successful for vault ${vaultAccountId}`);
+      this.logger.info("Reward withdrawal successful");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "withdrawRewards");
@@ -566,7 +573,7 @@ export class ApiController {
         sdk.getStakeAccountInfo(vaultAccountId)
       );
 
-      this.logger.info(`Staking account info retrieved successfully for vault ${vaultAccountId}`);
+      this.logger.info("Staking account info retrieved successfully");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "getStakeAccountInfo");
@@ -603,7 +610,7 @@ export class ApiController {
         sdk.queryStakingRewards(vaultAccountId)
       );
 
-      this.logger.info(`Staking rewards queried successfully for vault ${vaultAccountId}`);
+      this.logger.info("Staking rewards queried successfully");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "queryStakingRewards");
@@ -622,9 +629,7 @@ export class ApiController {
         sdk.castGovernanceVote({ vaultAccountId, governanceActionId, vote, anchor, fee })
       );
 
-      this.logger.info(
-        `Governance vote "${vote}" submitted for vault ${vaultAccountId}: ${result.txHash}`
-      );
+      this.logger.info(`Governance vote "${vote}" submitted: ${result.txHash}`);
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "castGovernanceVote");
@@ -644,7 +649,7 @@ export class ApiController {
         sdk.delegateToDRep({ vaultAccountId, drepAction, drepId, fee })
       );
 
-      this.logger.info(`DRep delegation successful for vault ${vaultAccountId}`);
+      this.logger.info("DRep delegation successful");
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "delegateToDRep");
@@ -663,7 +668,7 @@ export class ApiController {
         sdk.registerAsDRep({ vaultAccountId, anchor, depositAmount, fee })
       );
 
-      this.logger.info(`DRep registration submitted for vault ${vaultAccountId}: ${result.txHash}`);
+      this.logger.info(`DRep registration submitted: ${result.txHash}`);
       ok(res, result);
     } catch (error: unknown) {
       this.handleError(error, res, "registerAsDRep");
@@ -756,9 +761,7 @@ export class ApiController {
         sdk.getStakeAddress(vaultAccountId)
       );
 
-      this.logger.info(
-        `Stake address retrieved successfully for vault ${vaultAccountId}: ${stakeAddress}`
-      );
+      this.logger.info(`Stake address retrieved successfully: ${stakeAddress}`);
       ok(res, { stakeAddress });
     } catch (error: unknown) {
       this.handleError(error, res, "getStakeAddress");

@@ -10,6 +10,7 @@ export default {
       "ts-jest",
       {
         useESM: true,
+        diagnostics: { ignoreCodes: [151002] },
       },
     ],
   },
@@ -21,18 +22,15 @@ export default {
     "!src/app.ts",
     "!src/server.ts",
     "!src/api/router.ts",
-    "!src/api/controllers/**",
-    "!src/services/iagon.api.service.ts",
-    "!src/FireblocksCardanoRawSDK.ts",
   ],
   coverageThreshold: {
     global: {
-      branches: 5,
-      functions: 5,
-      lines: 8,
-      statements: 8,
+      branches: 42,
+      functions: 48,
+      lines: 49,
+      statements: 50,
     },
   },
-  coverageReporters: ["text", "lcov", "html"],
+  coverageReporters: ["text-summary", "lcov", "html"],
   testTimeout: 10000,
 };

@@ -146,7 +146,7 @@ export class StakingService {
       fee = CardanoAmounts.STAKING_TX_FEE,
     } = options;
 
-    this.logger.info(`Registering staking credential for vault account ${vaultAccountId}`);
+    this.logger.info("Registering staking credential");
 
     try {
       const existingRegistration = await this.validator.checkRegistrationStatus(vaultAccountId);
@@ -190,7 +190,7 @@ export class StakingService {
   async delegateToPool(options: DelegationOptions): Promise<StakingTransactionResult> {
     const { vaultAccountId, poolId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    this.logger.info(`Delegating to pool ${poolId} for vault account ${vaultAccountId}`);
+    this.logger.info("Delegating staking credential to pool");
 
     try {
       await this.validator.validateDelegationPrerequisites(vaultAccountId, poolId);
@@ -241,13 +241,13 @@ export class StakingService {
   ): Promise<StakingTransactionResult> {
     const { vaultAccountId, fee = CardanoAmounts.STAKING_TX_FEE } = options;
 
-    this.logger.info(`Deregistering staking credential for vault account ${vaultAccountId}`);
+    this.logger.info("Deregistering staking credential");
 
     try {
       const isRegistered = await this.validator.checkRegistrationStatus(vaultAccountId);
 
       if (!isRegistered) {
-        this.logger.info(`Staking credential not registered for vault ${vaultAccountId}`);
+        this.logger.info("Staking credential not registered");
         return {
           txHash: "",
           status: "not_registered",
@@ -285,7 +285,7 @@ export class StakingService {
       this.validateWithdrawalLimit(limit);
       await this.validator.validateRegistrationStatus(vaultAccountId, true);
 
-      this.logger.info(`Withdrawing rewards for vault account ${vaultAccountId}`);
+      this.logger.info("Withdrawing staking rewards");
 
       const minInputAmount = CardanoConstants.MIN_UTXO_BASE_LOVELACE + fee;
       const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(
@@ -389,7 +389,7 @@ export class StakingService {
         fee = CardanoAmounts.GOVERNANCE_TX_FEE,
       } = options;
 
-      this.logger.info(`Delegating to DRep (${drepAction}) for vault account ${vaultAccountId}`);
+      this.logger.info(`Delegating staking credential to DRep (${drepAction})`);
 
       this.validateDRepOptions(drepAction, drepId);
       await this.validator.validateRegistrationStatus(vaultAccountId, true);
@@ -444,7 +444,7 @@ export class StakingService {
         fee = CardanoAmounts.GOVERNANCE_TX_FEE,
       } = options;
 
-      this.logger.info(`Registering vault account ${vaultAccountId} as a DRep`);
+      this.logger.info("Registering configured vault as a DRep");
 
       const minInputAmount = depositAmount + fee;
       const addressWithUtxo = await this.utxoProvider.findAddressWithSuitableUtxo(
@@ -507,7 +507,7 @@ export class StakingService {
       } = options;
 
       this.logger.info(
-        `Casting vote "${vote}" on governance action ${governanceActionId.txHash}#${governanceActionId.index} for vault ${vaultAccountId}`
+        `Casting vote "${vote}" on governance action ${governanceActionId.txHash}#${governanceActionId.index}`
       );
 
       const voteInteger: 0 | 1 | 2 = vote === "no" ? 0 : vote === "yes" ? 1 : 2;
@@ -569,7 +569,7 @@ export class StakingService {
    */
   async queryStakingRewards(vaultAccountId: string): Promise<RewardsData> {
     try {
-      this.logger.info(`Querying staking rewards for vault account ${vaultAccountId}`);
+      this.logger.info("Querying staking rewards");
       const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
       return await this.rewardsService.queryRewards(stakeAddress);
     } catch (error: unknown) {
@@ -582,7 +582,7 @@ export class StakingService {
    */
   async getDelegationHistory(vaultAccountId: string, limit: number = 100) {
     try {
-      this.logger.info(`Getting delegation history for vault account ${vaultAccountId}`);
+      this.logger.info("Getting delegation history for configured vault");
       const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
       return await this.iagonApiService.getDelegationHistory(stakeAddress, 0, limit);
     } catch (error: unknown) {
@@ -595,7 +595,7 @@ export class StakingService {
    */
   async getRegistrationHistory(vaultAccountId: string, limit: number = 100) {
     try {
-      this.logger.info(`Getting registration history for vault account ${vaultAccountId}`);
+      this.logger.info("Getting registration history for configured vault");
       const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
       return await this.iagonApiService.getRegistrationHistory(stakeAddress, limit);
     } catch (error: unknown) {
@@ -608,7 +608,7 @@ export class StakingService {
    */
   async getStakeAccountInfo(vaultAccountId: string) {
     try {
-      this.logger.info(`Getting stake account info for vault account ${vaultAccountId}`);
+      this.logger.info("Getting stake account info");
       const stakeAddress = await this.addressResolver.getStakeAddress(vaultAccountId);
       return await this.iagonApiService.getStakeAccountInfo(stakeAddress);
     } catch (error: unknown) {

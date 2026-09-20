@@ -1,0 +1,82 @@
+import { BalanceResponse, GroupedBalanceResponse } from "./iagon/assets.js";
+import { HealthStatusResponse, getBalanceByAddressOpts } from "./iagon/general.js";
+import { TransactionDetailsResponse, TransferResponse } from "./iagon/transactions.js";
+import { UtxoIagonResponse } from "./iagon/UTXOs.js";
+import type { ChainQueries } from "./chain-queries.js";
+
+export type ChainProviderKind = "iagon" | "demeter";
+
+/** Fresh, network-bound parameters for the ordinary key-witness transfer builders. */
+export interface ProtocolParameterSnapshot {
+  networkMagic: number;
+  epoch: number;
+  fetchedAt: number;
+  minFeeA: number;
+  minFeeB: number;
+  coinsPerUtxoByte: number;
+  maxTxSize: number;
+  keyDeposit: number;
+  poolDeposit: number;
+}
+
+export enum ChainProviderCapability {
+  CORE = "core",
+  IAGON_COMPATIBILITY = "iagon-compatibility",
+  ACCOUNT_QUERIES = "credential-and-stake-queries",
+  HISTORY = "history",
+  STAKING = "staking",
+  GOVERNANCE = "governance",
+  POOLS = "pools",
+  ASSET_METADATA = "asset-metadata",
+}
+
+/**
+ * Provider-neutral surface required by balance, UTxO selection, transaction
+ * submission, and confirmation. IAGON implements the extended SDK surface;
+ * the Demeter POC intentionally implements only this core contract.
+ */
+export interface CardanoDataProvider {
+  readonly queries?: ChainQueries;
+  readonly kind: ChainProviderKind;
+  readonly capabilities: ReadonlySet<ChainProviderCapability>;
+  checkHealth(): Promise<HealthStatusResponse>;
+  getUtxosByAddress(address: string): Promise<UtxoIagonResponse>;
+  getBalanceByAddress(
+    params: getBalanceByAddressOpts
+  ): Promise<BalanceResponse | GroupedBalanceResponse>;
+  /** Optional authoritative network identity, when exposed by the provider. */
+  getNetworkMagic?(): Promise<number>;
+  getCurrentSlot(): Promise<number>;
+  getChainTip?(): Promise<{ slot: number; height: number; time: number; hash: string }>;
+  submitTransfer(tx: string, skipValidation?: boolean): Promise<TransferResponse>;
+  getTransactionDetails(hash: string): Promise<TransactionDetailsResponse | null>;
+  getFullTransactionDetails?(hash: string): Promise<TransactionDetailsResponse | null>;
+  getProtocolParameters?(): Promise<ProtocolParameterSnapshot>;
+}
+
+export type ChainProviderConfig =
+  | {
+      type: "iagon";
+      apiKey: string;
+      assetCacheTTL?: number;
+      /** @deprecated TLS certificate verification cannot be disabled. */
+      disableSslVerification?: boolean;
+    }
+  | {
+      type: "demeter";
+      baseUrl: string;
+      apiKey: string;
+      maxRetries?: number;
+      pageSize?: number;
+      maxPages?: number;
+    };
+
+export class ProviderCapabilityError extends Error {
+  constructor(
+    public readonly provider: ChainProviderKind,
+    public readonly capability: ChainProviderCapability
+  ) {
+    super(`Provider '${provider}' does not support the '${capability}' capability`);
+    this.name = "ProviderCapabilityError";
+  }
+}

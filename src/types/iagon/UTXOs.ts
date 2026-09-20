@@ -10,8 +10,8 @@ export interface UtxoData {
   };
   datum_hash: string | null;
   script_hash: string | null;
-  created_at: {
-    slot_no: number;
+  created_at?: {
+    slot_no?: number;
     header_hash: string;
   };
 }

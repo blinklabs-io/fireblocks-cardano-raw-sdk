@@ -1,7 +1,8 @@
 import { TransactionRequest, VaultWalletAddress, SignedMessageSignature } from "@fireblocks/ts-sdk";
-import { IagonApiService } from "../services/iagon.api.service.js";
+import { CardanoDataProvider } from "./providers.js";
 import { TransactionType, TransactionHistoryResponse } from "./index.js";
 import { TokenTransferSpec } from "./iagon/general.js";
+import { FireblocksGovernanceEvidence } from "./governance.js";
 
 /**
  * Options for getting a single vault account address by index
@@ -43,7 +44,7 @@ export interface GetTransactionHistoryOpts {
 }
 
 export interface fetchAndSelectUtxosForCntParams {
-  iagonApiService: IagonApiService;
+  chainProvider: CardanoDataProvider;
   address: string;
   tokenPolicyId: string;
   requiredTokenAmount: number;
@@ -53,7 +54,7 @@ export interface fetchAndSelectUtxosForCntParams {
 }
 
 export interface fetchAndSelectUtxosForAdaParams {
-  iagonApiService: IagonApiService;
+  chainProvider: CardanoDataProvider;
   address: string;
   /** Amount to send in lovelace */
   lovelaceAmount: number;
@@ -63,7 +64,7 @@ export interface fetchAndSelectUtxosForAdaParams {
 }
 
 export interface fetchAndSelectUtxosForMultiTokenParams {
-  iagonApiService: IagonApiService;
+  chainProvider: CardanoDataProvider;
   address: string;
   tokens: TokenTransferSpec[];
   transactionFee: number;
@@ -363,6 +364,8 @@ export interface AdaTransferResult {
    * Present only when token UTxOs were consumed to fund the transfer.
    */
   tokensPresentedInChange?: string[];
+  /** Present when strict Fireblocks RAW-signing governance was requested. */
+  governance?: FireblocksGovernanceEvidence;
 }
 
 /**

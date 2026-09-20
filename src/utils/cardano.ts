@@ -18,7 +18,7 @@ import {
   min_ada_for_output,
   DataCost,
 } from "@emurgo/cardano-serialization-lib-nodejs";
-import { IagonApiService } from "../services/index.js";
+import { CardanoDataProvider, ProtocolParameterSnapshot } from "../types/providers.js";
 import {
   CntTransactionOutputsParams,
   MultiTokenTransactionOutputsParams,
@@ -32,8 +32,18 @@ import {
 import { Logger } from "./logger.js";
 import { CardanoAmounts, CardanoConstants } from "../constants.js";
 import { utxoLocks } from "./utxoLock.js";
+import { blake2b } from "blakejs";
+import { SdkApiError } from "../types/index.js";
 
 const logger = new Logger("utils:cardano");
+
+const addSafeQuantity = (left: number, right: number): number => {
+  const sum = left + right;
+  if (![left, right, sum].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+    throw new Error("Unsafe accumulated quantity");
+  }
+  return sum;
+};
 
 /**
  * Cardano protocol parameters for fee calculation
@@ -58,6 +68,51 @@ _feeB.free();
 const _coinsPerByte = BigNum.from_str(CardanoAmounts.COINS_PER_UTXO_BYTE.toString());
 const DATA_COST = DataCost.new_coins_per_byte(_coinsPerByte);
 _coinsPerByte.free();
+
+/** Reject expired or malformed snapshots; callers must also bind the network to their intent. */
+export const validateProtocolParameters = (
+  parameters: ProtocolParameterSnapshot,
+  expectedMagic?: number
+): void => {
+  for (const value of Object.values(parameters)) {
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error("Invalid protocol parameter snapshot");
+  }
+  if (
+    !parameters.maxTxSize ||
+    !parameters.coinsPerUtxoByte ||
+    parameters.epoch === undefined ||
+    parameters.minFeeA === undefined ||
+    parameters.minFeeB === undefined ||
+    parameters.keyDeposit === undefined ||
+    parameters.poolDeposit === undefined ||
+    ![2, 1, 764824073].includes(parameters.networkMagic) ||
+    !parameters.fetchedAt ||
+    Date.now() - parameters.fetchedAt > 300_000 ||
+    parameters.fetchedAt > Date.now() + 30_000
+  ) {
+    throw new Error("Invalid or expired protocol parameter snapshot");
+  }
+  if (expectedMagic !== undefined && parameters.networkMagic !== expectedMagic) {
+    throw new Error("Protocol parameter network does not match configured network");
+  }
+};
+
+const outputMinimum = (
+  output: TransactionOutput,
+  parameters?: ProtocolParameterSnapshot
+): BigNum => {
+  if (!parameters) return min_ada_for_output(output, DATA_COST); // Legacy IAGON compatibility.
+  validateProtocolParameters(parameters);
+  const byteCost = BigNum.from_str(String(parameters.coinsPerUtxoByte));
+  const dataCost = DataCost.new_coins_per_byte(byteCost);
+  try {
+    return min_ada_for_output(output, dataCost);
+  } finally {
+    byteCost.free();
+    dataCost.free();
+  }
+};
 
 /**
  * Calculate the minimum required lovelace for a UTXO based on number of policies
@@ -130,7 +185,7 @@ export const calculateTransactionFee = (tx: Transaction): number => {
 
 export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCntParams) => {
   const {
-    iagonApiService,
+    chainProvider,
     address,
     tokenPolicyId,
     requiredTokenAmount,
@@ -139,7 +194,7 @@ export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCn
     lock = false,
   } = params;
   try {
-    const rawUtxos = await fetchUtxos(iagonApiService, address);
+    const rawUtxos = await fetchUtxos(chainProvider, address);
     const utxos = rawUtxos.filter((u) => !utxoLocks.isLocked(u.transaction_id, u.output_index));
 
     const tokenUtxosWithAmounts = filterUtxos(utxos, tokenPolicyId, tokenName)
@@ -169,7 +224,7 @@ export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCn
       }
       selectedUtxos.push(utxo);
       accumulatedTokenAmount += tokenAmount;
-      accumulatedAda += adaAmount;
+      accumulatedAda = addSafeQuantity(accumulatedAda, adaAmount);
 
       if (
         accumulatedTokenAmount >= requiredTokenAmount &&
@@ -217,7 +272,7 @@ export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCn
           break;
         }
         selectedUtxos.push(utxo);
-        accumulatedAda += adaAmount;
+        accumulatedAda = addSafeQuantity(accumulatedAda, adaAmount);
         if (accumulatedAda >= adaTarget) break;
       }
     }
@@ -249,12 +304,12 @@ export const fetchAndSelectUtxosForCnt = async (params: fetchAndSelectUtxosForCn
 };
 
 export const fetchUtxos = async (
-  iagonApiService: IagonApiService,
+  chainProvider: CardanoDataProvider,
   address: string
 ): Promise<UtxoData[]> => {
   try {
     logger.info(`Fetching UTXOs for address: ${address}`);
-    const response = await iagonApiService.getUtxosByAddress(address);
+    const response = await chainProvider.getUtxosByAddress(address);
 
     logger.info(`API Response:`, JSON.stringify(response, null, 2));
 
@@ -276,11 +331,8 @@ export const fetchUtxos = async (
       logger.warn(`API returned success=false for address: ${address}`);
       return [];
     }
-  } catch (error: unknown) {
-    logger.error(
-      `Error fetching UTXOs for ${address}: ${error instanceof Error ? error.message : String(error)}`,
-      error instanceof Error ? error.stack : undefined
-    );
+  } catch {
+    logger.error(`Error fetching UTXOs for ${address}`);
     return [];
   }
 };
@@ -394,7 +446,7 @@ export const createTransactionOutputs = (
   logger.info("Policy ID:", tokenPolicyId, "Token Name (hex):", tokenName, "Unit:", tokenUnit);
 
   const allAssets = collectAllAssets(selectedUtxos);
-  const totalLovelace = selectedUtxos.reduce((sum, u) => sum + u.value.lovelace, 0);
+  const totalLovelace = selectedUtxos.reduce((sum, u) => addSafeQuantity(sum, u.value.lovelace), 0);
   const totalTokenAmount = allAssets[tokenUnit] || 0;
 
   logger.info("All assets collected:", allAssets, "Total tokens for transfer:", totalTokenAmount);
@@ -424,7 +476,7 @@ export const createTransactionOutputs = (
     tempRecipientOutput = TransactionOutput.new(recipientAddress, tempRecipientValue);
     tempRecipientValue.free();
     tempRecipientValue = null;
-    minRecipientBN = min_ada_for_output(tempRecipientOutput, DATA_COST);
+    minRecipientBN = outputMinimum(tempRecipientOutput, params.protocolParameters);
     const actualMinRecipient = parseInt(minRecipientBN.to_str());
     minRecipientBN.free();
     minRecipientBN = null;
@@ -485,7 +537,8 @@ export const createTransactionOutputs = (
     senderAddress,
     changeLovelace,
     changeMultiAsset,
-    "change"
+    "change",
+    params.protocolParameters
   );
 
   logger.info("=== FINAL VALIDATION ===", "Recipient gets:", transferAmount, "of", tokenUnit);
@@ -524,7 +577,8 @@ export const buildCntTransactionWithCalculatedFee = (
     txInputs,
     ttl,
     estimatedWitnessCount,
-    "CNT"
+    "CNT",
+    params.protocolParameters
   );
 };
 
@@ -559,27 +613,56 @@ export const buildTransaction = ({
 };
 
 export const submitTransaction = async (
-  iagonApiService: IagonApiService,
+  chainProvider: CardanoDataProvider,
   signedTx: Transaction
 ): Promise<string> => {
   try {
     const txCbor = Buffer.from(signedTx.to_bytes()).toString("hex");
+    const body = signedTx.body();
+    const expectedHash = Buffer.from(blake2b(body.to_bytes(), undefined, 32)).toString("hex");
+    body.free();
 
-    logger.info(`=== TRANSACTION CBOR DEBUG ===`);
-    logger.info(`CBOR length: ${txCbor.length} chars (${txCbor.length / 2} bytes)`);
-    logger.info(`CBOR hex (first 200 chars): ${txCbor.substring(0, 200)}`);
-    logger.info(`CBOR hex (full): ${txCbor}`);
+    logger.info(`Submitting signed transaction (${txCbor.length / 2} CBOR bytes)`);
 
-    // Submit transaction using Iagon API
-    const response = await iagonApiService.submitTransfer(txCbor, false);
+    let response;
+    try {
+      response = await chainProvider.submitTransfer(txCbor, false);
+    } catch (error) {
+      // An ambiguous POST must not be blindly repeated. Only confirmed inclusion
+      // of our known hash is sufficient to reconcile a timeout/duplicate response.
+      if (
+        chainProvider.kind === "demeter" &&
+        error instanceof SdkApiError &&
+        (error.statusCode === undefined ||
+          error.statusCode === 409 ||
+          [500, 502, 503, 504].includes(error.statusCode))
+      ) {
+        const confirmed = await chainProvider.getTransactionDetails(expectedHash);
+        if (confirmed?.success && confirmed.data.tx_hash.toLowerCase() === expectedHash)
+          return expectedHash;
+        throw new Error(
+          `Submission outcome unknown for ${expectedHash}; check inclusion before retrying`,
+          { cause: error }
+        );
+      }
+      throw error;
+    }
 
     if (response.success) {
+      if (response.data.txHash.toLowerCase() !== expectedHash) {
+        throw new SdkApiError(
+          `Submission hash mismatch; expected ${expectedHash}`,
+          502,
+          "SubmissionHashMismatch"
+        );
+      }
       logger.info(`Transaction successfully submitted. Transaction ID: ${response.data.txHash}`);
-      return response.data.txHash;
+      return expectedHash;
     }
 
     throw new Error("Transaction submission failed");
   } catch (error) {
+    if (error instanceof SdkApiError) throw error;
     throw new Error(
       `Error submitting transaction: ${error instanceof Error ? error.message : error}`,
       { cause: error }
@@ -593,11 +676,13 @@ export const submitTransaction = async (
  * Module-private helper - not exported.
  */
 const collectAllAssets = (utxos: UtxoData[]): Record<string, number> => {
-  const result: Record<string, number> = {};
+  const result: Record<string, number> = Object.create(null);
   for (const utxo of utxos) {
     if (utxo.value.assets) {
       for (const [assetUnit, amount] of Object.entries(utxo.value.assets)) {
         result[assetUnit] = (result[assetUnit] || 0) + amount;
+        if (!Number.isSafeInteger(result[assetUnit]) || amount < 0)
+          throw new Error("Unsafe accumulated asset quantity");
       }
     }
   }
@@ -612,10 +697,10 @@ const collectAllAssets = (utxos: UtxoData[]): Record<string, number> => {
 const groupAssetsByPolicy = (
   assets: Record<string, number>
 ): Record<string, Record<string, number>> => {
-  const result: Record<string, Record<string, number>> = {};
+  const result: Record<string, Record<string, number>> = Object.create(null);
   for (const [assetUnit, amount] of Object.entries(assets)) {
     const [policyId, tokenNameHex] = assetUnit.split(".");
-    if (!result[policyId]) result[policyId] = {};
+    if (!result[policyId]) result[policyId] = Object.create(null);
     result[policyId][tokenNameHex] = amount;
   }
   return result;
@@ -633,6 +718,21 @@ const buildMultiAssetFromGrouped = (
     ([, tokens]) => Object.keys(tokens).length > 0
   );
   if (nonEmpty.length === 0) return null;
+
+  for (const [policyId, tokens] of nonEmpty) {
+    if (!/^[0-9a-fA-F]{56}$/.test(policyId)) {
+      throw new Error("Invalid token policy ID");
+    }
+    for (const tokenNameHex of Object.keys(tokens)) {
+      if (
+        tokenNameHex.length > 64 ||
+        tokenNameHex.length % 2 !== 0 ||
+        !/^[0-9a-fA-F]*$/.test(tokenNameHex)
+      ) {
+        throw new Error("Invalid token name hex");
+      }
+    }
+  }
 
   const multiAsset = MultiAsset.new();
   for (const [policyId, tokens] of nonEmpty) {
@@ -661,7 +761,8 @@ const buildValidatedOutput = (
   address: Address,
   lovelace: number,
   multiAsset: MultiAsset | null,
-  label: string
+  label: string,
+  parameters?: ProtocolParameterSnapshot
 ): TransactionOutput => {
   const lovelaceBigNum = BigNum.from_str(lovelace.toString());
   const value = Value.new(lovelaceBigNum);
@@ -669,7 +770,7 @@ const buildValidatedOutput = (
   if (multiAsset) value.set_multiasset(multiAsset);
   const output = TransactionOutput.new(address, value);
   // Defer value.free() until after min_ada_for_output
-  const minAdaBigNum = min_ada_for_output(output, DATA_COST);
+  const minAdaBigNum = outputMinimum(output, parameters);
   value.free();
   const minLovelace = parseInt(minAdaBigNum.to_str());
   minAdaBigNum.free();
@@ -698,8 +799,12 @@ const convergeTransactionFee = (
   txInputs: TransactionInput[],
   ttl: number,
   witnessCount: number,
-  label: string
+  label: string,
+  parameters?: ProtocolParameterSnapshot
 ): { outputs: TransactionOutput[]; fee: number; txBody: TransactionBody } => {
+  if (parameters) validateProtocolParameters(parameters);
+  if (!Number.isSafeInteger(witnessCount) || witnessCount < 1 || witnessCount > 100)
+    throw new Error("Invalid witness count");
   let currentFee = CardanoAmounts.TX_FEE_INITIAL_ESTIMATE;
 
   for (let i = 0; i < CardanoConstants.TX_FEE_MAX_ITERATIONS; i++) {
@@ -710,25 +815,48 @@ const convergeTransactionFee = (
 
     const txBodySize = txBody.to_bytes().length;
     const totalSize = txBodySize + witnessCount * CardanoConstants.TX_WITNESS_SIZE_BYTES + 10;
-    const calculatedFee = CardanoConstants.MIN_FEE_A * totalSize + CardanoConstants.MIN_FEE_B;
+    const calculatedFee =
+      (parameters?.minFeeA ?? CardanoConstants.MIN_FEE_A) * totalSize +
+      (parameters?.minFeeB ?? CardanoConstants.MIN_FEE_B);
+    const releaseIteration = () => {
+      txBody.free();
+      outputs.forEach((output) => output.free());
+    };
+    if (!Number.isSafeInteger(calculatedFee)) {
+      releaseIteration();
+      throw new Error("Unsafe calculated fee");
+    }
+    if (calculatedFee > CardanoAmounts.MAX_TRANSACTION_FEE_LOVELACE) {
+      releaseIteration();
+      throw new Error(
+        `Calculated transaction fee ${calculatedFee} exceeds local safety maximum ` +
+          `${CardanoAmounts.MAX_TRANSACTION_FEE_LOVELACE} lovelace`
+      );
+    }
+    if (parameters && totalSize > parameters.maxTxSize) {
+      releaseIteration();
+      throw new Error("Transaction exceeds protocol maxTxSize");
+    }
 
     logger.info(
       `[${label}] body: ${txBodySize}B, total: ${totalSize}B, fee: ${calculatedFee} lovelace`
     );
 
-    if (Math.abs(calculatedFee - currentFee) <= CardanoAmounts.TX_FEE_TOLERANCE) {
-      logger.info(`[${label}] fee converged at ${calculatedFee} after ${i + 1} iterations`);
-      return { outputs, fee: calculatedFee, txBody };
+    if (
+      currentFee >= calculatedFee &&
+      currentFee - calculatedFee <= CardanoAmounts.TX_FEE_TOLERANCE
+    ) {
+      logger.info(`[${label}] fee converged at ${currentFee} after ${i + 1} iterations`);
+      return { outputs, fee: currentFee, txBody };
     }
+    releaseIteration();
     currentFee = calculatedFee;
   }
 
   logger.warn(
     `[${label}] fee did not converge after ${CardanoConstants.TX_FEE_MAX_ITERATIONS} iterations`
   );
-  const finalOutputs = buildOutputsFn(currentFee);
-  const finalTxBody = buildTransaction({ txInputs, txOutputs: finalOutputs, fee: currentFee, ttl });
-  return { outputs: finalOutputs, fee: currentFee, txBody: finalTxBody };
+  throw new Error("Transaction fee did not converge; refusing unchecked fee");
 };
 
 /**
@@ -751,9 +879,9 @@ export const fetchAndSelectUtxosForAda = async (
   minChangeLovelace: number;
   release: () => void;
 }> => {
-  const { iagonApiService, address, lovelaceAmount, transactionFee, lock = false } = params;
+  const { chainProvider, address, lovelaceAmount, transactionFee, lock = false } = params;
 
-  const rawUtxos = await fetchUtxos(iagonApiService, address);
+  const rawUtxos = await fetchUtxos(chainProvider, address);
   const utxos = rawUtxos.filter((u) => !utxoLocks.isLocked(u.transaction_id, u.output_index));
   if (!utxos || utxos.length === 0) {
     throw new Error(`No UTxOs found for address: ${address}`);
@@ -782,7 +910,7 @@ export const fetchAndSelectUtxosForAda = async (
       break;
     }
     selectedUtxos.push(utxo);
-    accumulatedAda += utxo.value.lovelace;
+    accumulatedAda = addSafeQuantity(accumulatedAda, utxo.value.lovelace);
     if (accumulatedAda >= phase1Target) break;
   }
 
@@ -796,7 +924,7 @@ export const fetchAndSelectUtxosForAda = async (
         break;
       }
       selectedUtxos.push(utxo);
-      accumulatedAda += utxo.value.lovelace;
+      accumulatedAda = addSafeQuantity(accumulatedAda, utxo.value.lovelace);
       // Re-evaluate minimum after each addition - change output min grows with policy count
       const currentTokens = collectAllAssets(selectedUtxos);
       const numPolicies = countDistinctPolicies(currentTokens);
@@ -831,6 +959,7 @@ export const fetchAndSelectUtxosForAda = async (
 };
 
 export interface createAdaTransactionOutputsParams {
+  protocolParameters?: ProtocolParameterSnapshot;
   lovelaceAmount: number;
   fee: number;
   recipientAddress: Address;
@@ -851,7 +980,10 @@ export const createAdaTransactionOutputs = (
 ): TransactionOutput[] => {
   const { lovelaceAmount, fee, recipientAddress, senderAddress, selectedUtxos } = params;
 
-  const totalInputLovelace = selectedUtxos.reduce((sum, u) => sum + u.value.lovelace, 0);
+  const totalInputLovelace = selectedUtxos.reduce(
+    (sum, u) => addSafeQuantity(sum, u.value.lovelace),
+    0
+  );
   const changeLovelace = totalInputLovelace - lovelaceAmount - fee;
 
   // Recipient output (pure ADA) - throws if below protocol minimum
@@ -859,7 +991,8 @@ export const createAdaTransactionOutputs = (
     recipientAddress,
     lovelaceAmount,
     null,
-    "ADA recipient"
+    "ADA recipient",
+    params.protocolParameters
   );
 
   // Change output: remaining ADA + ALL tokens from spent UTxOs
@@ -872,7 +1005,8 @@ export const createAdaTransactionOutputs = (
     senderAddress,
     changeLovelace,
     changeMultiAsset,
-    "ADA change"
+    "ADA change",
+    params.protocolParameters
   );
 
   logger.info(
@@ -905,7 +1039,8 @@ export const buildAdaTransactionWithCalculatedFee = (
     txInputs,
     ttl,
     estimatedWitnessCount,
-    "ADA"
+    "ADA",
+    params.protocolParameters
   );
 };
 
@@ -930,9 +1065,9 @@ export const fetchAndSelectUtxosForMultiToken = async (
   minChangeLovelace: number;
   release: () => void;
 }> => {
-  const { iagonApiService, address, tokens, transactionFee, lovelaceAmount, lock = false } = params;
+  const { chainProvider, address, tokens, transactionFee, lovelaceAmount, lock = false } = params;
 
-  const rawUtxos = await fetchUtxos(iagonApiService, address);
+  const rawUtxos = await fetchUtxos(chainProvider, address);
   const utxos = rawUtxos.filter((u) => !utxoLocks.isLocked(u.transaction_id, u.output_index));
   if (!utxos || utxos.length === 0) {
     throw new Error(`No UTxOs found for address: ${address}`);
@@ -969,7 +1104,7 @@ export const fetchAndSelectUtxosForMultiToken = async (
       break;
     }
     selectedUtxos.push(utxo);
-    accumulatedAda += utxo.value.lovelace;
+    accumulatedAda = addSafeQuantity(accumulatedAda, utxo.value.lovelace);
     if (utxo.value.assets) {
       for (const [key, amount] of Object.entries(utxo.value.assets)) {
         accumulated[key] = (accumulated[key] || 0) + amount;
@@ -1012,7 +1147,7 @@ export const fetchAndSelectUtxosForMultiToken = async (
         break;
       }
       selectedUtxos.push(utxo);
-      accumulatedAda += utxo.value.lovelace;
+      accumulatedAda = addSafeQuantity(accumulatedAda, utxo.value.lovelace);
       if (accumulatedAda >= minRecipient + transactionFee + getMinChange()) break;
     }
   }
@@ -1055,12 +1190,16 @@ export const createMultiTokenTransactionOutputs = (
   const { tokens, fee, recipientAddress, senderAddress, selectedUtxos, minRecipientLovelace } =
     params;
 
-  const totalInputLovelace = selectedUtxos.reduce((sum, u) => sum + u.value.lovelace, 0);
+  const totalInputLovelace = selectedUtxos.reduce(
+    (sum, u) => addSafeQuantity(sum, u.value.lovelace),
+    0
+  );
 
   // Build recipient MultiAsset (group token specs by policy)
-  const recipientAssetsByPolicy: Record<string, Record<string, number>> = {};
+  const recipientAssetsByPolicy: Record<string, Record<string, number>> = Object.create(null);
   for (const t of tokens) {
-    if (!recipientAssetsByPolicy[t.tokenPolicyId]) recipientAssetsByPolicy[t.tokenPolicyId] = {};
+    if (!recipientAssetsByPolicy[t.tokenPolicyId])
+      recipientAssetsByPolicy[t.tokenPolicyId] = Object.create(null);
     recipientAssetsByPolicy[t.tokenPolicyId][t.tokenName] =
       (recipientAssetsByPolicy[t.tokenPolicyId][t.tokenName] || 0) + t.amount;
   }
@@ -1074,7 +1213,7 @@ export const createMultiTokenTransactionOutputs = (
   tempLovelaceBN.free();
   tempValue.set_multiasset(recipientMultiAsset);
   const tempOutput = TransactionOutput.new(recipientAddress, tempValue);
-  const minRecipientBN = min_ada_for_output(tempOutput, DATA_COST);
+  const minRecipientBN = outputMinimum(tempOutput, params.protocolParameters);
   tempValue.free(); // deferred until after min_ada calculation
   const actualMinRecipient = parseInt(minRecipientBN.to_str());
   minRecipientBN.free();
@@ -1083,7 +1222,7 @@ export const createMultiTokenTransactionOutputs = (
 
   // Change tokens: all input tokens minus what the recipient receives
   const allInputTokens = collectAllAssets(selectedUtxos);
-  const changeTokensFlat: Record<string, number> = {};
+  const changeTokensFlat: Record<string, number> = Object.create(null);
   for (const [assetUnit, amount] of Object.entries(allInputTokens)) {
     const [policyId, tokenNameHex] = assetUnit.split(".");
     const transferred = recipientAssetsByPolicy[policyId]?.[tokenNameHex] ?? 0;
@@ -1098,14 +1237,16 @@ export const createMultiTokenTransactionOutputs = (
     recipientAddress,
     recipientLovelace,
     recipientMultiAsset,
-    "multi-token recipient"
+    "multi-token recipient",
+    params.protocolParameters
   );
   recipientMultiAsset.free();
   const changeOutput = buildValidatedOutput(
     senderAddress,
     changeLovelace,
     changeMultiAsset,
-    "change"
+    "change",
+    params.protocolParameters
   );
   changeMultiAsset?.free();
 
@@ -1136,7 +1277,8 @@ export const buildMultiTokenTransactionWithCalculatedFee = (
     txInputs,
     ttl,
     estimatedWitnessCount,
-    "multi-token"
+    "multi-token",
+    params.protocolParameters
   );
 };
 
@@ -1155,7 +1297,10 @@ export const createConsolidationOutput = (
 ): TransactionOutput[] => {
   const { fee, senderAddress, selectedUtxos } = params;
 
-  const totalInputLovelace = selectedUtxos.reduce((sum, u) => sum + u.value.lovelace, 0);
+  const totalInputLovelace = selectedUtxos.reduce(
+    (sum, u) => addSafeQuantity(sum, u.value.lovelace),
+    0
+  );
   const outputLovelace = totalInputLovelace - fee;
 
   if (outputLovelace < CardanoConstants.MIN_UTXO_BASE_LOVELACE) {
@@ -1171,7 +1316,13 @@ export const createConsolidationOutput = (
       ? buildMultiAssetFromGrouped(groupAssetsByPolicy(allTokens))
       : null;
 
-  const output = buildValidatedOutput(senderAddress, outputLovelace, multiAsset, "consolidation");
+  const output = buildValidatedOutput(
+    senderAddress,
+    outputLovelace,
+    multiAsset,
+    "consolidation",
+    params.protocolParameters
+  );
 
   logger.info(
     `Consolidation output: ${outputLovelace} lovelace with ${Object.keys(allTokens).length} token assets`
@@ -1199,6 +1350,7 @@ export const buildConsolidationTransactionWithCalculatedFee = (
     txInputs,
     ttl,
     estimatedWitnessCount,
-    "consolidation"
+    "consolidation",
+    params.protocolParameters
   );
 };

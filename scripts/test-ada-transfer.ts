@@ -59,9 +59,7 @@ async function main() {
   // Validate network
   const validNetworks = ["mainnet", "preprod"];
   if (!validNetworks.includes(networkStr.toLowerCase())) {
-    throw new Error(
-      `Invalid CARDANO_NETWORK: "${networkStr}". Must be one of: ${validNetworks.join(", ")}`
-    );
+    throw new Error(`Invalid CARDANO_NETWORK. Must be one of: ${validNetworks.join(", ")}`);
   }
 
   const secretKey = resolveSecretKey();
@@ -70,10 +68,9 @@ async function main() {
   const lovelaceAmount = Math.floor(amountAda * 1_000_000);
 
   console.log(`\n=== ADA Transfer Test ===`);
-  console.log(`Network: ${networkStr}`);
+  console.log("Network configuration validated");
   console.log(`Amount: ${amountAda} ADA (${lovelaceAmount} lovelace)`);
-  console.log(`Source vault: ${sourceVault}`);
-  console.log(`Destination vault: ${destVault}`);
+  console.log("Source and destination vault configuration loaded");
   console.log(`========================\n`);
 
   console.log("Initializing SDK...");
@@ -119,7 +116,7 @@ async function main() {
   console.log(`View on explorer: ${explorerBase}/transaction/${result.txHash}`);
 }
 
-main().catch((err) => {
-  console.error("Transfer failed:", err);
+main().catch(() => {
+  console.error("Transfer failed");
   process.exit(1);
 });

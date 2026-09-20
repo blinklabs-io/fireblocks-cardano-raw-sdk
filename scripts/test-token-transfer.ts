@@ -97,9 +97,7 @@ async function main() {
 
   const validNetworks = ["mainnet", "preprod"];
   if (!validNetworks.includes(networkStr.toLowerCase())) {
-    throw new Error(
-      `Invalid CARDANO_NETWORK: "${networkStr}". Must be one of: ${validNetworks.join(", ")}`
-    );
+    throw new Error(`Invalid CARDANO_NETWORK. Must be one of: ${validNetworks.join(", ")}`);
   }
 
   if (!["full", "estimate", "transfer"].includes(mode)) {
@@ -111,12 +109,11 @@ async function main() {
   const network = networkStr.toLowerCase() === "mainnet" ? Networks.MAINNET : Networks.PREPROD;
 
   console.log(`\n=== CNT (native token) transfer test ===`);
-  console.log(`Network: ${networkStr}`);
+  console.log("Network configuration validated");
   console.log(`Policy: ${tokenPolicyId}`);
   console.log(`Token name (hex): ${tokenName}`);
   console.log(`Amount (base units): ${requiredTokenAmount}`);
-  console.log(`Source vault: ${sourceVault} (index ${addressIndex})`);
-  console.log(`Destination vault: ${destVault} (index ${recipientIndex})`);
+  console.log(`Source and destination vault indexes loaded (${addressIndex}, ${recipientIndex})`);
   console.log(`Mode: ${mode}`);
   console.log(`========================================\n`);
 
@@ -172,7 +169,7 @@ async function main() {
   console.log(`View on explorer: ${explorerBase}/transaction/${result.txHash}`);
 }
 
-main().catch((err) => {
-  console.error("Token transfer failed:", err);
+main().catch(() => {
+  console.error("Token transfer failed");
   process.exit(1);
 });
